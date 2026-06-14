@@ -55,16 +55,17 @@ aws cloudformation deploy \
     --stack-name gentrail-substrate \
     --s3-bucket "$STAGING" --s3-prefix substrate \
     --parameter-overrides \
-        Hostname=gentrail.acme.com \
-        OtelHostname=otel.acme.com \
-        HostedZoneId=Z0123456789ABCDEFGHIJ \
         BedrockModelId="us.anthropic.claude-sonnet-4-5-20250929-v1:0" \
         ArchiverCodeS3Bucket="$STAGING" \
         ArchiverCodeS3Key=lambda/archiver.zip \
     --capabilities CAPABILITY_NAMED_IAM
 ```
 
-If `HostedZoneId` is omitted, you'll create the DNS records manually in Step 8.
+This is an **internal install** by default: the ALBs are private (reachable
+inside your VPC / over VPN), so no domain is required. For a **public**
+internet-facing install instead, also pass `Hostname=` and `OtelHostname=`, and
+either `HostedZoneId=` (CFN issues the cert) or `ExistingAcmCertArn=`, then set
+`ingress.internal=false` at Step 7.
 
 **Bedrock-model availability.** Model access is a manual, per-account
 per-region console opt-in that neither CloudFormation nor IAM can grant. The
@@ -154,35 +155,28 @@ helm install gentrail deploy/m3/helm/gentrail \
 kubectl -n gentrail rollout status deployment/dashboard --timeout=180s
 ```
 
-## 8. Wait for the ALBs and create the Route 53 alias records (~3 min)
+The install is **internal by default**: the ALBs are private, so no public
+domain or DNS is needed. For a public, internet-facing install instead, pass
+`--set ingress.internal=false` (and provide the domain + cert from Step 2).
 
-The chart creates two Ingresses, each with its own ALB: `dashboard` (the web
-UI, at `Hostname`) and `authproxy` (OTLP ingestion, at `OtelHostname`). Create
-an alias record for each:
+## 8. Reach the install (~2 min)
+
+Wait for the ALBs, then read their DNS names:
 
 ```bash
-HOSTED_ZONE_ID=Z0123456789ABCDEFGHIJ
-
-for PAIR in "dashboard:Hostname" "authproxy:OtelHostname"; do
-    INGRESS="${PAIR%%:*}"; OUTPUT="${PAIR##*:}"
-    ALB_DNS=$(kubectl -n gentrail get ingress "$INGRESS" \
-        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-    NAME=$(aws cloudformation describe-stacks --stack-name gentrail-substrate \
-        --query "Stacks[0].Outputs[?OutputKey=='${OUTPUT}'].OutputValue" --output text)
-    ALB_HOSTED_ZONE_ID=$(aws elbv2 describe-load-balancers \
-        --query "LoadBalancers[?DNSName=='${ALB_DNS}'].CanonicalHostedZoneId" --output text)
-    aws route53 change-resource-record-sets --hosted-zone-id "$HOSTED_ZONE_ID" --change-batch "{
-        \"Changes\":[{\"Action\":\"UPSERT\",\"ResourceRecordSet\":{\"Name\":\"${NAME}\",\"Type\":\"A\",
-        \"AliasTarget\":{\"HostedZoneId\":\"${ALB_HOSTED_ZONE_ID}\",\"DNSName\":\"${ALB_DNS}\",\"EvaluateTargetHealth\":false}}}]}"
-done
+kubectl -n gentrail get ingress
 ```
 
-If you opted out of Route 53 delegation, create the equivalent A/CNAME records
-in your DNS provider pointing each hostname at its ALB DNS.
+- **Internal install (default):** the ALBs are private. Reach the dashboard and
+  the OTLP ingest endpoint over your VPC / VPN using the ALB DNS names, or point
+  your own DNS (a private hosted zone, or any A/CNAME records) at them. We don't
+  touch your DNS.
+- **Public install:** create A/CNAME records in your DNS pointing your
+  `Hostname` / `OtelHostname` at the matching ALB DNS name.
 
-Point your agent SDK's `OTEL_EXPORTER_OTLP_ENDPOINT` env var at
-`https://<OtelHostname>` (the SDK appends `/v1/traces`). Step 10 walks through
-sending your first trace. To watch evaluation as traces arrive:
+Point your agent SDK's `OTEL_EXPORTER_OTLP_ENDPOINT` at the authproxy endpoint
+(the SDK appends `/v1/traces`); an internal HTTP endpoint is `http://<alb-dns>`.
+Step 10 walks through the first trace. Watch evaluation:
 `kubectl -n gentrail logs deploy/evaluator -f`.
 
 ## 9. Open the dashboard

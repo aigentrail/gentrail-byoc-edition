@@ -25,6 +25,13 @@ ingress:
   host: ""
   certArn: ""
   otelHost: "" # OTLP ingest FQDN for the authproxy (otel.aigentrail.com)
+  # Default true: both ALBs use the internal scheme (reachable only inside the
+  # VPC / over VPN), so no public domain is needed - the cluster network is the
+  # boundary and clients use the ALB DNS names (or DNS you point yourself). Set
+  # false for a public, internet-facing install (then provide host + certArn).
+  # TLS is driven by certArn independently of scheme: with a certArn the ALB
+  # serves HTTPS, without one HTTP (fine for a VPC-private endpoint).
+  internal: true
 
 # PVC storage class. "" uses the cluster default (k3s local-path); set gp2 on EKS.
 storage:

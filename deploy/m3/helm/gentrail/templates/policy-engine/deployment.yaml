@@ -37,6 +37,9 @@ spec:
             - name: LLM_MODEL
               value: {{ .Values.llm.model | quote }}
 {{- include "gentrail.licenseEnv" . | nindent 12 }}
+            {{- if and .Values.irsa.policyEngine .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaEnv" .Values.irsa.policyEngine | nindent 12 }}
+            {{- end }}
           resources: {{- toYaml .Values.policyEngine.resources | nindent 12 }}
           readinessProbe:
             httpGet: { path: /v1/health, port: http }
@@ -48,5 +51,11 @@ spec:
             periodSeconds: 30
           volumeMounts:
 {{- include "gentrail.licenseMount" . | nindent 12 }}
+            {{- if and .Values.irsa.policyEngine .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaTokenMount" . | nindent 12 }}
+            {{- end }}
       volumes:
 {{- include "gentrail.licenseVolume" . | nindent 8 }}
+        {{- if and .Values.irsa.policyEngine .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
+        {{- end }}

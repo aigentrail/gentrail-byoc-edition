@@ -202,8 +202,8 @@ Parameters:
     Description: Optional Route 53 hosted zone ID. Empty = customer makes DNS records manually.
   Hostname:
     Type: String
-    MinLength: 1
-    Description: FQDN for the dashboard ALB (e.g. gentrail.acme.com).
+    Default: ""
+    Description: Optional FQDN for the dashboard ALB (public installs). Empty (default) = internal install; clients use the ALB DNS name or DNS you point yourself.
   OtelHostname:
     Type: String
     Default: ""
