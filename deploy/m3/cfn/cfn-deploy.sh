@@ -10,6 +10,8 @@ set -euo pipefail
 
 STACK="${STACK:-gentrail-byoc-validate}"
 REGION="${REGION:-us-west-2}"
+# Export so bare `aws` calls in sub-scripts (cfn-to-values.sh) inherit the region.
+export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
 TEMPLATE_BUCKET="${TEMPLATE_BUCKET:-aigentrail-tfstate-617072386017}"
 CLUSTER="${CLUSTER:-gtbx}"
 PREFIX="${PREFIX:-$CLUSTER}"
@@ -93,16 +95,14 @@ SC
 log "cfn-to-values -> $VALUES"
 "$HERE/../scripts/cfn-to-values.sh" "$STACK" > "$VALUES"
 
-log "namespace + image-pull + license secrets"
+log "namespace + image-pull secret"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n "$NAMESPACE" create secret docker-registry ghcr \
   --docker-server=ghcr.io --docker-username="$(gh api user --jq .login)" \
   --docker-password="$(gh auth token)" --dry-run=client -o yaml | kubectl apply -f -
-license_jwt=$(aws secretsmanager get-secret-value --secret-id "$LICENSE_SM_SECRET" \
-  --region "$REGION" --query SecretString --output text)
-[ -n "$LICENSE_JWT_KEY" ] && license_jwt=$(printf '%s' "$license_jwt" | jq -r ".$LICENSE_JWT_KEY")
-kubectl -n "$NAMESPACE" create secret generic gentrail-license \
-  --from-literal=jwt="$license_jwt" --dry-run=client -o yaml | kubectl apply -f -
+# The chart provisions an empty gentrail-license secret (pre-install hook); the
+# license is pasted in the dashboard, not created here. Vendor validation may
+# optionally pre-fill it after install (below).
 
 log "helm upgrade --install gentrail"
 helm upgrade --install gentrail "$CHART" -n "$NAMESPACE" \
@@ -115,4 +115,18 @@ helm upgrade --install gentrail "$CHART" -n "$NAMESPACE" \
   --timeout 12m --wait
 
 kubectl -n "$NAMESPACE" get pods
+
+# Optional: pre-fill the license from Secrets Manager (vendor validation), the
+# same patch the in-dashboard upload performs. Absent (e.g. customer accounts)
+# the install stays unlicensed and you paste the license in the dashboard.
+if license_jwt=$(aws secretsmanager get-secret-value --secret-id "$LICENSE_SM_SECRET" \
+    --region "$REGION" --query SecretString --output text 2>/dev/null); then
+  [ -n "$LICENSE_JWT_KEY" ] && license_jwt=$(printf '%s' "$license_jwt" | jq -r ".$LICENSE_JWT_KEY")
+  kubectl -n "$NAMESPACE" patch secret gentrail-license --type merge \
+    -p "{\"stringData\":{\"jwt\":\"${license_jwt}\"}}" >/dev/null
+  log "license pre-filled from $LICENSE_SM_SECRET"
+else
+  log "no Secrets Manager license; install is unlicensed - paste it in the dashboard"
+fi
+
 log "done. export KUBECONFIG=$KUBECONFIG"
