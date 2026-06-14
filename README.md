@@ -11,8 +11,7 @@ container images are public; a signed license is what unlocks the stack.
    your free BYOC evaluation license is shown on the page and emailed to you.
 2. Save the license JWT to a file. It becomes a Kubernetes Secret in Step 6.
 
-The license is a 10-agent, 60-day evaluation. To extend or upgrade to Unlimited,
-email support@gentrail.ai (see Section 12).
+The license is a 10-agent, 60-day evaluation. Questions: support@gentrail.ai.
 
 ## 0. Prerequisites
 
@@ -23,14 +22,7 @@ email support@gentrail.ai (see Section 12).
 - `python3` and `pip` if you want to run the SDK quickstart in Step 10a.
 - Optionally, a Route 53 hosted zone you control for the dashboard hostname. If you don't share Route 53 with us, you'll create the DNS record manually in Step 9.
 
-## 1. Generate an ExternalId
-
-```bash
-EXTERNAL_ID="$(uuidgen)x$(uuidgen)"
-echo "$EXTERNAL_ID"   # save somewhere — you'll email it to us in step 3
-```
-
-## 1b. Stage the CFN template + archiver Lambda (~1 min)
+## 1. Stage the CFN template + archiver Lambda (~1 min)
 
 The substrate template is >51 KB, over CloudFormation's inline limit, so it
 deploys from a staging S3 bucket. The trace-archiver Lambda zip (vendor ships
@@ -51,11 +43,11 @@ aws s3 cp archiver.zip "s3://$STAGING/lambda/archiver.zip"
 
 The substrate template is the single CFN you deploy — it provisions
 everything: VPC, EKS, RDS, S3, KMS, DDB, IRSA roles, ACM cert, the
-Bedrock-model validator Lambda, the trace-archiver Lambda (expired traces
-archive to S3 with GLACIER tiering, same retention as Gentrail cloud), AND the
-cross-account scanner role the vendor will assume into your account. The
+Bedrock-model validator Lambda, and the trace-archiver Lambda (expired traces
+archive to S3 with GLACIER tiering, same retention as Gentrail cloud). The
 Gentrail services themselves (authproxy, evaluator, dashboard, policy-engine,
-NATS) install as pods via the Helm chart in Step 7.
+NATS) install as pods via the Helm chart in Step 7. Nothing reaches into your
+account.
 
 ```bash
 aws cloudformation deploy \
@@ -66,8 +58,7 @@ aws cloudformation deploy \
         Hostname=gentrail.acme.com \
         OtelHostname=otel.acme.com \
         HostedZoneId=Z0123456789ABCDEFGHIJ \
-        ExternalId="${EXTERNAL_ID}" \
-        BedrockModelId="anthropic.claude-3-5-sonnet-20241022-v2:0" \
+        BedrockModelId="us.anthropic.claude-sonnet-4-5-20250929-v1:0" \
         ArchiverCodeS3Bucket="$STAGING" \
         ArchiverCodeS3Key=lambda/archiver.zip \
     --capabilities CAPABILITY_NAMED_IAM
@@ -80,8 +71,9 @@ per-region console opt-in that neither CloudFormation nor IAM can grant. The
 validator is therefore advisory: if the chosen model isn't enabled it records
 a WARNING on the `BedrockModelValidation` resource and the stack still
 completes. The policy engine is the only Bedrock consumer; enable model
-access before turning it on. List what's available:
-`aws bedrock list-foundation-models --region us-west-2 --query 'modelSummaries[?starts_with(modelId,\`anthropic.\`)].modelId'`.
+access before turning it on. The default is a cross-region inference profile;
+list what's available:
+`aws bedrock list-inference-profiles --region us-west-2 --query 'inferenceProfileSummaries[?starts_with(inferenceProfileId,\`us.anthropic.\`)].inferenceProfileId'`.
 
 **For sandbox / test installs**, also pass:
 - `RdsDeletionProtection=false` — production default is true, but if the
@@ -101,20 +93,6 @@ kubectl get nodes
 ```
 
 Expect 2 nodes `Ready`.
-
-## 3a. Email vendor the cross-account scanner role + ExternalId (~30s)
-
-Copy these two values and send them to `support@gentrail.ai`:
-
-```bash
-aws cloudformation describe-stacks --stack-name gentrail-substrate \
-    --query 'Stacks[0].Outputs[?OutputKey==`GentrailReadOnlyRoleArn`].OutputValue' --output text
-echo "ExternalId: $EXTERNAL_ID"
-```
-
-The vendor uses these to assume into your account from their scanner
-suite. The role is read-only (`ReadOnlyAccess` + `SecurityAudit`,
-nothing more); access is gated by your ExternalId.
 
 ## 4. Install AWS Load Balancer Controller (~2 min)
 
@@ -283,9 +261,8 @@ Your license is a single Ed25519-signed JWT delivered by email from the Gentrail
 
 - **Pre-expiry:** services start cleanly and log `license: valid for customer=… expires_in=N days`.
 - **Within 30 days of expiry:** the dashboard shows a renewal banner and every restart logs `WARN license: expires in N days for customer=… tier=…`. The exact `N` lets your log aggregator escalate however you want (e.g. page on `N <= 7`).
-- **After expiry (30-day grace):** everything keeps working at full function. The dashboard banner counts down the grace window. **Your traces, evaluations, violations, and dashboard reads keep working.**
-- **After grace:** the install degrades to free-tier limits: compliance/audit routes show the upgrade wall and new agents beyond the free cap stop being captured. Existing agents keep flowing and nothing is deleted, so a late renewal restores full function with no gap.
-- **Renewal:** email `support@gentrail.ai` ahead of expiry. The vendor mints a new JWT and emails it. An org admin can paste it on the dashboard's License page (`/?view=license`): it verifies locally, patches the license Secret through a single-secret RBAC grant, and takes effect everywhere within about two minutes. Updating the Kubernetes Secret by hand works identically:
+- **At expiry:** the install goes **read-only** (reads keep working, new writes are refused, nothing is deleted). See Section 12. Install a new license to resume.
+- **Installing a license:** an org admin can paste one on the dashboard's License page (`/?view=license`): it verifies locally, patches the license Secret through a single-secret RBAC grant, and takes effect everywhere within about two minutes. Updating the Kubernetes Secret by hand works identically:
 
 ```bash
 kubectl -n gentrail create secret generic gentrail-license \
@@ -312,7 +289,7 @@ There is no online revocation. Licenses simply expire on their stated `exp`.
 
 ## 12. BYOC free tier
 
-The BYOC free tier is a capped, time-boxed evaluation license. It gives you full observability (trace ingestion, agent visibility, policy/violation detection) and the dashboard for 60 days with up to 10 registered agents. The compliance and audit suite (reports, evidence exports, continuous audit controls) is **Unlimited tier only**.
+The BYOC free tier is a capped, time-boxed evaluation license. It gives you full observability (trace ingestion, agent visibility, policy/violation detection) and the dashboard for 60 days with up to 10 registered agents.
 
 ### Getting a free license
 
@@ -338,21 +315,7 @@ At the license `exp` the install transitions to **read-only**:
 
 Pre-expiry warnings fire in service logs and a dashboard countdown banner at **30 / 14 / 7 / 1 days** remaining.
 
-Expiry enforcement is evaluated per request against the license `exp`, so the read-only gate engages at the expiry instant on running pods; no restart is involved.
-
-### Upgrading free → Unlimited (in-place)
-
-The upgrade is non-destructive. All captured data is preserved and the install rehydrates to full functionality on restart; no re-ingestion or re-seeding required.
-
-All four services watch the same `gentrail-license` Secret as a mounted file, so the upgrade is one secret update with no restarts and no downtime:
-
-```bash
-kubectl -n gentrail create secret generic gentrail-license \
-    --from-file=jwt=<name>-unlimited.jwt \
-    --dry-run=client -o yaml | kubectl apply -f -
-```
-
-**Within about two minutes:** the 10-agent cap lifts, the compliance/audit navigation unlocks in the dashboard, and any read-only or cap banners clear. Each service logs `license: reloaded` as it picks the new license up.
+Expiry enforcement is evaluated per request against the license `exp`, so the read-only gate engages at the expiry instant on running pods; no restart is involved. Installing a new license (Section 11) is non-destructive: captured data is preserved and the gates clear within about two minutes, no restart.
 
 ---
 

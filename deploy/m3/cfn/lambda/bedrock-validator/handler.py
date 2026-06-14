@@ -39,11 +39,18 @@ def handler(event, context):
 
     model_id = event["ResourceProperties"]["BedrockModelId"]
     region = event["ResourceProperties"]["Region"]
+    # A region prefix (us./eu./apac.) marks a cross-region inference profile,
+    # which lives in a different API than foundation models.
+    is_profile = model_id.split(".", 1)[0] in ("us", "eu", "apac")
 
     try:
         client = boto3.client("bedrock", region_name=region)
-        models = client.list_foundation_models()["modelSummaries"]
-        available_ids = {m["modelId"] for m in models}
+        if is_profile:
+            summaries = client.list_inference_profiles()["inferenceProfileSummaries"]
+            available_ids = {p["inferenceProfileId"] for p in summaries}
+        else:
+            models = client.list_foundation_models()["modelSummaries"]
+            available_ids = {m["modelId"] for m in models}
     except Exception as exc:
         _respond(event, context, "SUCCESS",
                  f"WARNING: could not verify Bedrock access in {region} ({exc}); "
@@ -51,8 +58,9 @@ def handler(event, context):
         return
 
     if model_id not in available_ids:
+        kind = "inference profile" if is_profile else "model"
         _respond(event, context, "SUCCESS",
-                 f"WARNING: Bedrock model {model_id!r} not enabled in {region}; "
+                 f"WARNING: Bedrock {kind} {model_id!r} not available in {region}; "
                  f"enable model access before using the policy engine. "
                  f"Available: {sorted(available_ids)[:5]}...")
         return

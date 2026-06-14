@@ -101,9 +101,12 @@ dashboard:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
 
-# Likewise, policy-engine integrates Bedrock as part of SP5 — until then,
-# stay at 0 replicas. The dashboard works fine without it for SP2's
-# trace-ingestion-only feature surface.
+# policy-engine now speaks Bedrock (llm.provider/llm.model below; IRSA grants
+# bedrock:InvokeModel). Enable it by setting replicaCount: 1 once the configured
+# model is granted access in the account/region - the substrate's validator
+# checks availability, but Bedrock model access is a separate console opt-in.
+# The dashboard works without it; AI policy extraction is the only feature it
+# powers.
 policyEngine:
   replicaCount: 0
   resources:

@@ -54,6 +54,7 @@ Metadata:
       - Label: { default: "LLM" }
         Parameters:
           - BedrockModelId
+          - BedrockFoundationModelId
       - Label: { default: "Observability" }
         Parameters:
           - CloudWatchLogsRetentionDays
@@ -222,11 +223,21 @@ Parameters:
   # ── LLM ────────────────────────────────────────────────────────────────
   BedrockModelId:
     Type: String
-    Default: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    Default: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     Description: >
-      Bedrock model ID for the policy engine. A CustomResource checks it at
-      stack-create and WARNS (advisory, non-blocking) if it is not yet enabled
-      in this account/region. Enable model access before using the policy engine.
+      Bedrock model the policy engine invokes. Claude 4 is reachable only via a
+      cross-region inference profile (the us./eu./apac. prefix), which is what
+      this default is. A CustomResource checks it at stack-create and WARNS
+      (advisory, non-blocking) if it is not yet enabled in this account/region.
+      Enable model access before using the policy engine.
+
+  BedrockFoundationModelId:
+    Type: String
+    Default: "anthropic.claude-sonnet-4-5-20250929-v1:0"
+    Description: >
+      The foundation model behind BedrockModelId (strip the region prefix). Used
+      only to scope the policy engine's bedrock:InvokeModel IAM to the models the
+      inference profile routes to. Keep in step with BedrockModelId.
 
   # ── Observability ──────────────────────────────────────────────────────
   CloudWatchLogsRetentionDays:
@@ -242,7 +253,11 @@ Parameters:
   ExternalId:
     Type: String
     NoEcho: true
-    MinLength: 16
+    Default: ""
+    Description: >-
+      Cross-account external ID for the optional AWS security scan (a paid
+      feature). Leave empty on the free tier: the cross-account scanner role is
+      then not created and nothing reaches into this account.
 
 Mappings:
   # AZ index → letter suffix. Used to name subnets predictably.
@@ -255,6 +270,9 @@ Mappings:
     "5": { Suffix: "f" }
 
 Conditions:
+  # The cross-account security scanner is a paid feature; it is created only when
+  # an ExternalId is supplied. Free-tier installs leave ExternalId empty.
+  EnableScanner: !Not [ !Equals [ !Ref ExternalId, "" ] ]
   CreateKmsKey: !Equals [ !Ref ExistingKmsKeyArn, "" ]
   CreateAcmCert: !And
     - !Equals [ !Ref ExistingAcmCertArn, "" ]
@@ -1240,14 +1258,16 @@ Resources:
                 Effect: Allow
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref RdsMasterSecret
-              # The dashboard's cloud-scanner assumes GentrailReadOnlyRole in a
-              # target account to enumerate Bedrock agents + run compliance
-              # checks. In same-account BYOC the target is this account; the
-              # scanner role's trust is governed by VendorAccountId.
-              - Sid: AssumeScannerRole
-                Effect: Allow
-                Action: sts:AssumeRole
-                Resource: !GetAtt GentrailReadOnlyRole.Arn
+              # The cloud-scanner assumes GentrailReadOnlyRole to enumerate
+              # Bedrock agents + run compliance checks. Only present when the
+              # scanner is enabled (paid); free installs omit it entirely.
+              - !If
+                - EnableScanner
+                - Sid: AssumeScannerRole
+                  Effect: Allow
+                  Action: sts:AssumeRole
+                  Resource: !GetAtt GentrailReadOnlyRole.Arn
+                - !Ref "AWS::NoValue"
       Tags:
         - { Key: gentrail:service-account, Value: dashboard }
 
@@ -1277,9 +1297,14 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              # A cross-region inference profile needs InvokeModel on both the
+              # profile and the foundation models it routes to (region wildcard
+              # covers every region the profile spans).
               - Effect: Allow
                 Action: bedrock:InvokeModel
-                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+                Resource:
+                  - !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/${BedrockModelId}"
+                  - !Sub "arn:aws:bedrock:*::foundation-model/${BedrockFoundationModelId}"
       Tags:
         - { Key: gentrail:service-account, Value: policy-engine }
 
@@ -1317,6 +1342,7 @@ Resources:
   # email that + your ExternalId to the Gentrail vendor.
   GentrailReadOnlyRole:
     Type: AWS::IAM::Role
+    Condition: EnableScanner
     Properties:
       RoleName: !Sub "gentrail-readonly-${AWS::Region}"
       AssumeRolePolicyDocument:
@@ -1584,7 +1610,9 @@ Resources:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
-                Action: bedrock:ListFoundationModels
+                Action:
+                  - bedrock:ListFoundationModels
+                  - bedrock:ListInferenceProfiles
                 Resource: "*"
 
   BedrockValidatorFn:
@@ -1609,16 +1637,24 @@ Resources:
               if e["RequestType"] == "Delete":
                   return _r(e, c, "SUCCESS", "delete-noop")
               m, r = e["ResourceProperties"]["BedrockModelId"], e["ResourceProperties"]["Region"]
+              # A region prefix (us./eu./apac.) marks a cross-region inference
+              # profile, which lives in a different API than foundation models.
+              is_profile = m.split(".", 1)[0] in ("us", "eu", "apac")
               # Advisory only: a model-access gap must not block substrate
               # provisioning. The policy engine is the sole Bedrock consumer and is
               # enabled separately, so surface a WARNING in the stack events (visible
               # on the CustomResource) instead of FAILING the whole stack.
               try:
-                  ids = {x["modelId"] for x in boto3.client("bedrock", region_name=r).list_foundation_models()["modelSummaries"]}
+                  bc = boto3.client("bedrock", region_name=r)
+                  if is_profile:
+                      ids = {p["inferenceProfileId"] for p in bc.list_inference_profiles()["inferenceProfileSummaries"]}
+                  else:
+                      ids = {x["modelId"] for x in bc.list_foundation_models()["modelSummaries"]}
               except Exception as ex:
                   return _r(e, c, "SUCCESS", f"WARNING: could not verify Bedrock access in {r} ({ex}); enable model access before using the policy engine")
               if m not in ids:
-                  return _r(e, c, "SUCCESS", f"WARNING: Bedrock model {m!r} not enabled in {r}; enable model access before using the policy engine. First 5 available: {sorted(ids)[:5]}")
+                  kind = "inference profile" if is_profile else "model"
+                  return _r(e, c, "SUCCESS", f"WARNING: Bedrock {kind} {m!r} not available in {r}; enable model access before using the policy engine. First 5: {sorted(ids)[:5]}")
               _r(e, c, "SUCCESS", f"model {m} available in {r}")
 
   BedrockModelValidation:
@@ -1706,5 +1742,6 @@ Outputs:
   RdsBootstrapIrsaRoleArn: { Value: !GetAtt RdsBootstrapIrsaRole.Arn }
 
   GentrailReadOnlyRoleArn:
+    Condition: EnableScanner
     Description: Cross-account vendor scanner role ARN — email this + your ExternalId to support@gentrail.ai
     Value: !GetAtt GentrailReadOnlyRole.Arn
