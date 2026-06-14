@@ -1,0 +1,30 @@
+# Overlay that delivers the license as a mounted file instead of env, matching
+# the chart's hot-reload path. Usage:
+#   LICENSE_DIR=<dir containing a "jwt" file> \
+#     docker compose -f docker-compose.yml -f compose.license-file.yml up -d
+# LICENSE_RELOAD_SECONDS shrinks the poll for tests (default 60).
+services:
+  dashboard:
+    environment:
+      LICENSE_JWT_FILE: /etc/gentrail/license/jwt
+      LICENSE_RELOAD_SECONDS: ${LICENSE_RELOAD_SECONDS:-60}
+    volumes:
+      - ${LICENSE_DIR:?set LICENSE_DIR to the directory holding the jwt file}:/etc/gentrail/license:ro
+  policy-engine:
+    environment:
+      LICENSE_JWT_FILE: /etc/gentrail/license/jwt
+      LICENSE_RELOAD_SECONDS: ${LICENSE_RELOAD_SECONDS:-60}
+    volumes:
+      - ${LICENSE_DIR:?set LICENSE_DIR to the directory holding the jwt file}:/etc/gentrail/license:ro
+  evaluator:
+    environment:
+      LICENSE_JWT_FILE: /etc/gentrail/license/jwt
+      LICENSE_RELOAD_SECONDS: ${LICENSE_RELOAD_SECONDS:-60}
+    volumes:
+      - ${LICENSE_DIR:?set LICENSE_DIR to the directory holding the jwt file}:/etc/gentrail/license:ro
+  authproxy:
+    environment:
+      LICENSE_JWT_FILE: /etc/gentrail/license/jwt
+      LICENSE_RELOAD_SECONDS: ${LICENSE_RELOAD_SECONDS:-60}
+    volumes:
+      - ${LICENSE_DIR:?set LICENSE_DIR to the directory holding the jwt file}:/etc/gentrail/license:ro

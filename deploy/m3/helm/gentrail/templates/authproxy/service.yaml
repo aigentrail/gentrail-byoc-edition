@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: authproxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "authproxy") .) | indent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 4318
+      targetPort: otlp
+      name: otlp
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "authproxy") .) | indent 4 }}

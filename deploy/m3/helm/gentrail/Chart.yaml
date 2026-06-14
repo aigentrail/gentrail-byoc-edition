@@ -1,0 +1,10 @@
+apiVersion: v2
+name: gentrail
+description: "Gentrail M3 BYOC stack on Kubernetes: dashboard, policy-engine, authproxy, evaluator, and NATS"
+type: application
+version: 0.1.4
+appVersion: "v0.1.0"
+kubeVersion: ">= 1.30.0-0"
+maintainers:
+  - name: Gentrail
+    email: support@gentrail.ai

@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evaluator
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "evaluator") .) | indent 4 }}
+spec:
+  replicas: {{ .Values.evaluator.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "evaluator") .) | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "evaluator") .) | indent 8 }}
+    spec:
+      serviceAccountName: evaluator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
+      containers:
+        - name: evaluator
+          image: {{ include "gentrail.image" (merge (dict "component" "evaluator") .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: health
+              containerPort: 8080
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: EVENT_BUS
+              value: nats
+            - name: NATS_URL
+              value: "nats://nats:4222"
+            - name: NATS_STREAM_REPLICAS
+              value: {{ .Values.nats.replicas | quote }}
+            - name: DYNAMO_TRACES_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-traces{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_VIOLATIONS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-violations{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_AGENT_STATS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-agent-stats{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_POLICY_RULES_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-policy-rules{{ .Values.ddb.tableSuffix }}"
+{{- include "gentrail.licenseEnv" . | nindent 12 }}
+{{- include "gentrail.localEnv" . | nindent 12 }}
+            {{- if and .Values.irsa.evaluator .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaEnv" .Values.irsa.evaluator | nindent 12 }}
+            {{- end }}
+          resources: {{- toYaml .Values.evaluator.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /livez, port: health }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+{{- include "gentrail.licenseMount" . | nindent 12 }}
+          {{- if and .Values.irsa.evaluator .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaTokenMount" . | nindent 12 }}
+          {{- end }}
+      volumes:
+{{- include "gentrail.licenseVolume" . | nindent 8 }}
+          {{- if and .Values.irsa.evaluator .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
+          {{- end }}

@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "nats") .) | indent 4 }}
+spec:
+  serviceName: nats-headless
+  replicas: {{ .Values.nats.replicas }}
+  selector:
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "nats") .) | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "nats") .) | indent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/nats/config.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
+      containers:
+        - name: nats
+          image: docker.io/library/nats:2.10-alpine
+          args: ["-c", "/etc/nats/nats.conf"]
+          ports:
+            - { name: client, containerPort: 4222 }
+            - { name: cluster, containerPort: 6222 }
+            - { name: monitor, containerPort: 8222 }
+          resources: {{- toYaml .Values.nats.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: monitor }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: config, mountPath: /etc/nats }
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: nats }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        {{- if .Values.storage.class }}
+        storageClassName: {{ .Values.storage.class | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.nats.jetstreamSize | quote }}

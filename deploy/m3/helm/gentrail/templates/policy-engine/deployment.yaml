@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: policy-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "policy-engine") .) | indent 4 }}
+spec:
+  replicas: {{ .Values.policyEngine.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "policy-engine") .) | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "policy-engine") .) | indent 8 }}
+    spec:
+      serviceAccountName: policy-engine
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
+      containers:
+        - name: policy-engine
+          image: {{ include "gentrail.image" (merge (dict "component" "policy-engine") .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8100
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: LLM_PROVIDER
+              value: {{ .Values.llm.provider | quote }}
+            - name: LLM_MODEL
+              value: {{ .Values.llm.model | quote }}
+{{- include "gentrail.licenseEnv" . | nindent 12 }}
+          resources: {{- toYaml .Values.policyEngine.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /v1/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /v1/health, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+{{- include "gentrail.licenseMount" . | nindent 12 }}
+      volumes:
+{{- include "gentrail.licenseVolume" . | nindent 8 }}

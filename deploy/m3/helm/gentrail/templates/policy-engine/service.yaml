@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-engine
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "policy-engine") .) | indent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8100
+      targetPort: http
+      name: http
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "policy-engine") .) | indent 4 }}

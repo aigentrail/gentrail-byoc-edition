@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "dashboard") .) | indent 4 }}
+spec:
+  replicas: {{ .Values.dashboard.replicaCount }}
+  selector:
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "dashboard") .) | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "dashboard") .) | indent 8 }}
+    spec:
+      serviceAccountName: dashboard
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
+      containers:
+        - name: dashboard
+          image: {{ include "gentrail.image" (merge (dict "component" "dashboard") .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8001
+          env:
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: DYNAMO_TRACES_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-traces{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_VIOLATIONS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-violations{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_AGENT_STATS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-agent-stats{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_POLICY_RULES_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-policy-rules{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_API_KEYS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-api-keys{{ .Values.ddb.tableSuffix }}"
+            - name: EVIDENCE_BUCKET
+              value: {{ .Values.s3.evidenceBucket | quote }}
+            - name: EVIDENCE_BUCKET_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: NATS_URL
+              value: "nats://nats:4222"
+            - name: NATS_STREAM_REPLICAS
+              value: {{ .Values.nats.replicas | quote }}
+            - name: POLICY_ENGINE_URL
+              value: "http://policy-engine:8100"
+            - name: AUDIT_LOOP_ENABLED
+              value: {{ .Values.dashboard.auditLoop | quote }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: gentrail-rds-secret
+                  key: dsn
+{{- include "gentrail.licenseEnv" . | nindent 12 }}
+            - name: LICENSE_SECRET_NAME
+              value: {{ .Values.license.secretRef | quote }}
+            {{- if .Values.dashboard.cookieDomain }}
+            - name: AIGENTRAIL_COOKIE_DOMAIN
+              value: {{ .Values.dashboard.cookieDomain | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.sessionSecretName }}
+            - name: AIGENTRAIL_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dashboard.sessionSecretName }}
+                  key: session-secret
+            {{- end }}
+            {{- if .Values.dashboard.adminTokenSecretName }}
+            - name: ADMIN_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dashboard.adminTokenSecretName }}
+                  key: admin-token
+            {{- end }}
+{{- include "gentrail.localEnv" . | nindent 12 }}
+            {{- if and .Values.irsa.dashboard .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaEnv" .Values.irsa.dashboard | nindent 12 }}
+            {{- end }}
+          resources: {{- toYaml .Values.dashboard.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - name: audit-buffer
+              mountPath: /var/lib/gentrail/audit
+{{- include "gentrail.licenseMount" . | nindent 12 }}
+            {{- if and .Values.irsa.dashboard .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaTokenMount" . | nindent 12 }}
+            {{- end }}
+      volumes:
+{{- include "gentrail.licenseVolume" . | nindent 8 }}
+        - name: audit-buffer
+          persistentVolumeClaim:
+            claimName: dashboard-audit-buffer
+        {{- if and .Values.irsa.dashboard .Values.aws.irsaInjectToken }}
+{{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
+        {{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: dashboard-audit-buffer
+  namespace: {{ .Release.Namespace }}
+spec:
+  {{- if .Values.storage.class }}
+  storageClassName: {{ .Values.storage.class | quote }}
+  {{- end }}
+  accessModes: [ ReadWriteOnce ]
+  resources:
+    requests:
+      storage: {{ .Values.audit.pvcSize | quote }}

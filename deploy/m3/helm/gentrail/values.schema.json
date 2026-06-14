@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["aws", "image", "ingress", "ddb", "s3", "rds", "kms", "llm", "irsa", "license"],
+  "properties": {
+    "aws":     { "type": "object", "required": ["region"], "properties": { "region": { "type": "string" } } },
+    "image":   { "type": "object", "required": ["registry", "tag"], "properties": { "registry": { "type": "string" }, "tag": { "type": "string" }, "pullPolicy": { "type": "string" }, "pullSecret": { "type": "string" } } },
+    "ingress": { "type": "object", "required": ["host"], "properties": { "host": { "type": "string" }, "certArn": { "type": "string" } } },
+    "ddb":     { "type": "object", "required": ["tablePrefix"], "properties": { "tablePrefix": { "type": "string" } } },
+    "s3":      { "type": "object", "required": ["evidenceBucket"], "properties": { "evidenceBucket": { "type": "string" } } },
+    "rds":     { "type": "object", "required": ["endpoint", "secretArn"], "properties": { "endpoint": { "type": "string" }, "secretArn": { "type": "string" } } },
+    "kms":     { "type": "object", "required": ["keyArn"], "properties": { "keyArn": { "type": "string" } } },
+    "llm":     { "type": "object", "required": ["provider", "model"], "properties": { "provider": { "type": "string", "enum": ["bedrock", "openai"] }, "model": { "type": "string" } } },
+    "irsa":    { "type": "object", "required": ["dashboard", "policyEngine", "rdsBootstrap"], "properties": { "dashboard": { "type": "string" }, "policyEngine": { "type": "string" }, "rdsBootstrap": { "type": "string" } } },
+    "license": { "type": "object", "required": ["secretRef"], "properties": { "secretRef": { "type": "string" } } }
+  }
+}

@@ -1,0 +1,27 @@
+# The in-product license upload patches exactly one secret: the mounted
+# license that every service hot-reloads. get+patch on that one name, nothing
+# else, so a compromised dashboard cannot read or touch any other secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: dashboard-license-writer
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.license.secretRef | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: dashboard-license-writer
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: dashboard-license-writer
+subjects:
+  - kind: ServiceAccount
+    name: dashboard
+    namespace: {{ .Release.Namespace }}

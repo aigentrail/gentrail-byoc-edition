@@ -1,0 +1,106 @@
+{{- if .Values.local.enabled }}
+# Local-only stand-ins so the chart runs end to end on k3s/k3d without real AWS:
+# DynamoDB-local + Postgres + the table-init Job. Gated on local.enabled; never
+# rendered for a cloud install. The init-aws ConfigMap is created by the runner
+# from the canonical deploy/m3/init/init-aws.sh, so table definitions never fork.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamodb-local
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "dynamodb-local") .) | indent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/component: dynamodb-local }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/component: dynamodb-local }
+    spec:
+      containers:
+        - name: dynamodb-local
+          image: docker.io/amazon/dynamodb-local:2.5.2
+          args: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+          ports:
+            - { containerPort: 8000 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamodb-local
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app.kubernetes.io/component: dynamodb-local }
+  ports:
+    - { port: 8000, targetPort: 8000 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "postgres") .) | indent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/component: postgres }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/component: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16-alpine
+          env:
+            - { name: POSTGRES_DB, value: gentrail }
+            - { name: POSTGRES_USER, value: gentrail }
+            - { name: POSTGRES_PASSWORD, value: gentrail }
+          ports:
+            - { containerPort: 5432 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector: { app.kubernetes.io/component: postgres }
+  ports:
+    - { port: 5432, targetPort: 5432 }
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gentrail-rds-secret
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  dsn: "postgres://gentrail:gentrail@postgres:5432/gentrail?sslmode=disable"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: init-aws
+  namespace: {{ .Release.Namespace }}
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init-aws
+          image: docker.io/amazon/aws-cli:2.17.0
+          command: ["/bin/sh", "/init/init-aws.sh"]
+          env:
+            - { name: AWS_ACCESS_KEY_ID, value: local }
+            - { name: AWS_SECRET_ACCESS_KEY, value: local }
+            - { name: AWS_REGION, value: {{ .Values.aws.region | quote }} }
+            - { name: DDB_ENDPOINT, value: {{ .Values.ddb.endpoint | quote }} }
+          volumeMounts:
+            - { name: init, mountPath: /init, readOnly: true }
+      volumes:
+        - name: init
+          configMap: { name: init-aws }
+{{- end }}

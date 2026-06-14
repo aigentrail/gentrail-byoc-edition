@@ -1,0 +1,1710 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Gentrail M3 BYOC substrate — VPC, EKS, RDS, S3, KMS, DDB, IRSA, ACM.
+  Single template per SP2 spec decision. Resources currently empty;
+  filled in incrementally across SP2 tasks 3–11.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Network" }
+        Parameters:
+          - VpcCidr
+          - AzCount
+          - AllowedIngressCidr
+          - EnableVpcEndpoints
+          - EnableVpcFlowLogs
+      - Label: { default: "EKS" }
+        Parameters:
+          - ClusterName
+          - EksVersion
+          - NodeInstanceType
+          - NodeCountMin
+          - NodeCountDesired
+          - NodeCountMax
+          - EksLogTypes
+      - Label: { default: "Encryption (P3)" }
+        Parameters:
+          - ExistingKmsKeyArn
+          - KmsKeyAlias
+          - S3ObjectLockRetentionDays
+      - Label: { default: "DynamoDB" }
+        Parameters:
+          - DdbBillingMode
+          - DdbEnablePointInTimeRecovery
+          - DdbTableNamePrefix
+      - Label: { default: "Trace archiving" }
+        Parameters:
+          - ArchiverCodeS3Bucket
+          - ArchiverCodeS3Key
+      - Label: { default: "RDS" }
+        Parameters:
+          - RdsInstanceClass
+          - RdsAllocatedStorageGb
+          - RdsBackupRetentionDays
+          - RdsMultiAz
+          - RdsEnabledCloudwatchLogsExports
+      - Label: { default: "Ingress / TLS (P3)" }
+        Parameters:
+          - HostedZoneId
+          - Hostname
+          - ExistingAcmCertArn
+          - EnableAlbAccessLogs
+          - TlsPolicy
+      - Label: { default: "LLM" }
+        Parameters:
+          - BedrockModelId
+      - Label: { default: "Observability" }
+        Parameters:
+          - CloudWatchLogsRetentionDays
+      - Label: { default: "Cross-account (P4)" }
+        Parameters:
+          - VendorAccountId
+          - ExternalId
+
+Parameters:
+  # ── Network ────────────────────────────────────────────────────────────
+  VpcCidr:
+    Type: String
+    Default: "10.0.0.0/16"
+    AllowedPattern: "^([0-9]{1,3}\\.){3}[0-9]{1,3}/(1[6-9]|2[0-8])$"
+  AzCount:
+    Type: Number
+    Default: 3
+    MinValue: 2
+    MaxValue: 6
+  AllowedIngressCidr:
+    Type: String
+    Default: "0.0.0.0/0"
+    Description: CIDR allowed to reach the ALB on 443. Narrow post-install.
+  EnableVpcEndpoints:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+  EnableVpcFlowLogs:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+
+  # ── EKS ────────────────────────────────────────────────────────────────
+  ClusterName:
+    Type: String
+    Default: gentrail
+    AllowedPattern: "^[a-zA-Z][a-zA-Z0-9-]{0,99}$"
+  EksVersion:
+    Type: String
+    Default: "1.32"
+    AllowedPattern: "^[0-9]+\\.[0-9]+$"
+  NodeInstanceType:
+    Type: String
+    Default: t3.medium
+  NodeCountMin:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  NodeCountDesired:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  NodeCountMax:
+    Type: Number
+    Default: 6
+    MinValue: 1
+  EksLogTypes:
+    Type: CommaDelimitedList
+    Default: "audit,authenticator,api"
+
+  # ── Encryption (P3) ────────────────────────────────────────────────────
+  ExistingKmsKeyArn:
+    Type: String
+    Default: ""
+    Description: >
+      Empty = CFN creates a new CMK with rotation. Non-empty = BYOK: use
+      the given key as the substrate KEK. Customer holds key control either
+      way; vendor never has kms:Decrypt.
+  KmsKeyAlias:
+    Type: String
+    Default: "alias/gentrail-substrate"
+  S3ObjectLockRetentionDays:
+    Type: Number
+    Default: 2555
+    MinValue: 1
+    MaxValue: 36500
+
+  # ── DynamoDB ───────────────────────────────────────────────────────────
+  DdbBillingMode:
+    Type: String
+    AllowedValues: [ "PAY_PER_REQUEST", "PROVISIONED" ]
+    Default: "PAY_PER_REQUEST"
+  DdbEnablePointInTimeRecovery:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+  DdbTableNamePrefix:
+    Type: String
+    Default: gentrail
+    AllowedPattern: "^[a-z][a-z0-9-]{0,30}$"
+
+  # ── Trace archiving ────────────────────────────────────────────────────
+  ArchiverCodeS3Bucket:
+    Type: String
+    MinLength: 1
+    Description: >
+      S3 bucket in this stack's region holding the trace-archiver Lambda zip.
+      Stage services/ingestion/lambda-archiver/archiver.zip there before
+      create-stack (cfn-deploy.sh does this automatically). The archiver
+      copies TTL-expired traces to the trace-archive bucket (GLACIER
+      tiering), matching Gentrail cloud's retention behavior.
+  ArchiverCodeS3Key:
+    Type: String
+    Default: "gentrail/archiver.zip"
+
+  # ── RDS ────────────────────────────────────────────────────────────────
+  RdsInstanceClass:
+    Type: String
+    Default: db.t3.medium
+  RdsAllocatedStorageGb:
+    Type: Number
+    Default: 100
+    MinValue: 20
+    MaxValue: 16000
+  RdsBackupRetentionDays:
+    Type: Number
+    Default: 35
+    MinValue: 0
+    MaxValue: 35
+  RdsMultiAz:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+  RdsEnabledCloudwatchLogsExports:
+    Type: CommaDelimitedList
+    Default: "postgresql"
+  EnableRdsPerformanceInsights:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+    Description: Performance Insights requires db.t3.medium+. Set false on smaller instances.
+  RdsDeletionProtection:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+    Description: >
+      Production default is true. Set false for sandbox/test installs so failed
+      deploys can roll back cleanly — DeletionProtection=true blocks CFN from
+      deleting the RDS instance during rollback, wedging the stack.
+
+  # ── Ingress / TLS (P3) ─────────────────────────────────────────────────
+  HostedZoneId:
+    Type: String
+    Default: ""
+    Description: Optional Route 53 hosted zone ID. Empty = customer makes DNS records manually.
+  Hostname:
+    Type: String
+    MinLength: 1
+    Description: FQDN for the dashboard ALB (e.g. gentrail.acme.com).
+  OtelHostname:
+    Type: String
+    Default: ""
+    Description: Optional FQDN for the OTLP ingest ALB (e.g. otel.acme.com). Empty disables the authproxy ingress.
+  ExistingAcmCertArn:
+    Type: String
+    Default: ""
+    Description: Optional. If empty AND HostedZoneId is set, CFN creates a new ACM cert via DNS-01.
+  EnableAlbAccessLogs:
+    Type: String
+    AllowedValues: [ "true", "false" ]
+    Default: "true"
+  TlsPolicy:
+    Type: String
+    Default: "ELBSecurityPolicy-TLS13-1-3-2021-06"
+
+  # ── LLM ────────────────────────────────────────────────────────────────
+  BedrockModelId:
+    Type: String
+    Default: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    Description: >
+      Bedrock model ID for the policy engine. A CustomResource checks it at
+      stack-create and WARNS (advisory, non-blocking) if it is not yet enabled
+      in this account/region. Enable model access before using the policy engine.
+
+  # ── Observability ──────────────────────────────────────────────────────
+  CloudWatchLogsRetentionDays:
+    Type: Number
+    Default: 30
+    AllowedValues: [ 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653 ]
+
+  # ── Cross-account (P4) ─────────────────────────────────────────────────
+  VendorAccountId:
+    Type: String
+    Default: "617072386017"
+    AllowedPattern: "^[0-9]{12}$"
+  ExternalId:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+
+Mappings:
+  # AZ index → letter suffix. Used to name subnets predictably.
+  AzIndexToSuffix:
+    "0": { Suffix: "a" }
+    "1": { Suffix: "b" }
+    "2": { Suffix: "c" }
+    "3": { Suffix: "d" }
+    "4": { Suffix: "e" }
+    "5": { Suffix: "f" }
+
+Conditions:
+  CreateKmsKey: !Equals [ !Ref ExistingKmsKeyArn, "" ]
+  CreateAcmCert: !And
+    - !Equals [ !Ref ExistingAcmCertArn, "" ]
+    - !Not [ !Equals [ !Ref HostedZoneId, "" ] ]
+  HasHostedZone: !Not [ !Equals [ !Ref HostedZoneId, "" ] ]
+  EnableVpcEndpointsCond: !Equals [ !Ref EnableVpcEndpoints, "true" ]
+  EnableVpcFlowLogsCond: !Equals [ !Ref EnableVpcFlowLogs, "true" ]
+  EnableRdsPerformanceInsightsCond: !Equals [ !Ref EnableRdsPerformanceInsights, "true" ]
+  EnableAlbAccessLogsCond: !Equals [ !Ref EnableAlbAccessLogs, "true" ]
+  ThreeOrMoreAzs: !Not [ !Equals [ !Ref AzCount, 2 ] ]
+  FourOrMoreAzs: !Or [ !Equals [ !Ref AzCount, 4 ], !Equals [ !Ref AzCount, 5 ], !Equals [ !Ref AzCount, 6 ] ]
+  FiveOrMoreAzs: !Or [ !Equals [ !Ref AzCount, 5 ], !Equals [ !Ref AzCount, 6 ] ]
+  SixAzs: !Equals [ !Ref AzCount, 6 ]
+
+Resources:
+  # ── VPC ──────────────────────────────────────────────────────────────
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-vpc" }
+        - { Key: !Sub "kubernetes.io/cluster/${ClusterName}", Value: shared }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-igw" }
+  IgwAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # ── Public subnets (one per AZ, /20 each) ───────────────────────────
+  # CIDR slicing: VpcCidr=10.0.0.0/16 → public 10.0.0.0/20, 10.0.16.0/20, …
+  PublicSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 0, !Cidr [ !Ref VpcCidr, 6, 12 ] ]
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-public-a" }
+        - { Key: "kubernetes.io/role/elb", Value: "1" }
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 1, !Cidr [ !Ref VpcCidr, 6, 12 ] ]
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-public-b" }
+        - { Key: "kubernetes.io/role/elb", Value: "1" }
+  PublicSubnet2:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 2, !Cidr [ !Ref VpcCidr, 6, 12 ] ]
+      AvailabilityZone: !Select [ 2, !GetAZs "" ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-public-c" }
+        - { Key: "kubernetes.io/role/elb", Value: "1" }
+
+  # ── Private subnets (one per AZ, /20 each, offset by 3) ─────────────
+  PrivateSubnet0:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 3, !Cidr [ !Ref VpcCidr, 6, 12 ] ]
+      AvailabilityZone: !Select [ 0, !GetAZs "" ]
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-private-a" }
+        - { Key: "kubernetes.io/role/internal-elb", Value: "1" }
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 4, !Cidr [ !Ref VpcCidr, 6, 12 ] ]
+      AvailabilityZone: !Select [ 1, !GetAZs "" ]
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-private-b" }
+        - { Key: "kubernetes.io/role/internal-elb", Value: "1" }
+  PrivateSubnet2:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Select [ 5, !Cidr [ !Ref VpcCidr, 6, 12 ] ]
+      AvailabilityZone: !Select [ 2, !GetAZs "" ]
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-private-c" }
+        - { Key: "kubernetes.io/role/internal-elb", Value: "1" }
+
+  # ── NAT gateways (one per public AZ; high cost but matches AWS best-practice)
+  NatEip0:
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttach
+    Properties:
+      Domain: vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nat-a" } ]
+  NatGateway0:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip0.AllocationId
+      SubnetId: !Ref PublicSubnet0
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nat-a" } ]
+  NatEip1:
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttach
+    Properties:
+      Domain: vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nat-b" } ]
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nat-b" } ]
+  NatEip2:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::EIP
+    DependsOn: IgwAttach
+    Properties:
+      Domain: vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nat-c" } ]
+  NatGateway2:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nat-c" } ]
+
+  # ── Route tables ──────────────────────────────────────────────────
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-public-rt" } ]
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IgwAttach
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+  PublicSubnet0Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet0, RouteTableId: !Ref PublicRouteTable }
+  PublicSubnet1Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet1, RouteTableId: !Ref PublicRouteTable }
+  PublicSubnet2Assoc:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PublicSubnet2, RouteTableId: !Ref PublicRouteTable }
+
+  # One private route table per AZ → its own NAT gateway
+  PrivateRouteTable0:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-private-rt-a" } ]
+  PrivateDefaultRoute0:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable0
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway0
+  PrivateSubnet0Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet0, RouteTableId: !Ref PrivateRouteTable0 }
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-private-rt-b" } ]
+  PrivateDefaultRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway1
+  PrivateSubnet1Assoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet1, RouteTableId: !Ref PrivateRouteTable1 }
+
+  PrivateRouteTable2:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-private-rt-c" } ]
+  PrivateDefaultRoute2:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGateway2
+  PrivateSubnet2Assoc:
+    Condition: ThreeOrMoreAzs
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref PrivateSubnet2, RouteTableId: !Ref PrivateRouteTable2 }
+
+  # ── Security groups (default-deny; tight ingress) ─────────────────
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: ALB ingress (443 only)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref AllowedIngressCidr
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-alb-sg" } ]
+
+  NodesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: EKS nodes - accept only from ALB SG
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-nodes-sg" } ]
+  NodesIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodesSecurityGroup
+      IpProtocol: tcp
+      FromPort: 1024
+      ToPort: 65535
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+  NodesIngressSelf:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref NodesSecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref NodesSecurityGroup
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: RDS - accept Postgres only from EKS nodes
+      Tags: [ { Key: Name, Value: !Sub "${ClusterName}-rds-sg" } ]
+  RdsIngressFromNodes:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref NodesSecurityGroup
+  # Pod ENIs created by the VPC CNI sit in the EKS-managed cluster security
+  # group, NOT in NodesSecurityGroup. Without this rule, pods (including
+  # the dashboard) can't reach RDS even though the node itself can.
+  RdsIngressFromClusterSg:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref RdsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+
+  # ── VPC Flow Logs (optional; default on) ──────────────────────────
+  FlowLogsLogGroup:
+    Condition: EnableVpcFlowLogsCond
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vpc/${ClusterName}-flow-logs"
+      RetentionInDays: !Ref CloudWatchLogsRetentionDays
+  FlowLogsRole:
+    Condition: EnableVpcFlowLogsCond
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: vpc-flow-logs.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteFlowLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !GetAtt FlowLogsLogGroup.Arn
+  VpcFlowLog:
+    Condition: EnableVpcFlowLogsCond
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogsRole.Arn
+      LogGroupName: !Ref FlowLogsLogGroup
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: ALL
+
+  # ── VPC endpoints (optional; default on; cuts NAT cost) ──────────
+  S3GatewayEndpoint:
+    Condition: EnableVpcEndpointsCond
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.s3"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable0
+        - !Ref PrivateRouteTable1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateRouteTable2, !Ref AWS::NoValue ]
+  DdbGatewayEndpoint:
+    Condition: EnableVpcEndpointsCond
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.dynamodb"
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTable0
+        - !Ref PrivateRouteTable1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateRouteTable2, !Ref AWS::NoValue ]
+
+  EndpointSecurityGroup:
+    Condition: EnableVpcEndpointsCond
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref Vpc
+      GroupDescription: Interface VPC endpoints - 443 from nodes
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref NodesSecurityGroup
+  KmsInterfaceEndpoint:
+    Condition: EnableVpcEndpointsCond
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.kms"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [ !Ref EndpointSecurityGroup ]
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ]
+  BedrockInterfaceEndpoint:
+    Condition: EnableVpcEndpointsCond
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.bedrock-runtime"
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: [ !Ref EndpointSecurityGroup ]
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ]
+
+  # ── KMS substrate key (P3 KEK) ────────────────────────────────────
+  SubstrateKmsKey:
+    Condition: CreateKmsKey
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub "Gentrail substrate KEK - ${ClusterName}"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AccountAdmin
+            Effect: Allow
+            Principal: { AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root" }
+            Action: kms:*
+            Resource: "*"
+          # EC2 autoscaling needs CreateGrant to encrypt EBS volumes on
+          # EKS managed-node-group instances. Without this, the node
+          # group fails with "Client.InvalidKMSKey.InvalidState" and the
+          # cluster never gets workers.
+          - Sid: AllowAutoscalingSLR
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+          - Sid: AllowAutoscalingSLRCreateGrant
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
+            Action: kms:CreateGrant
+            Resource: "*"
+            Condition:
+              Bool: { "kms:GrantIsForAWSResource": "true" }
+      Tags:
+        - { Key: gentrail:role, Value: substrate-kek }
+  SubstrateKmsAlias:
+    Condition: CreateKmsKey
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Ref KmsKeyAlias
+      TargetKeyId: !Ref SubstrateKmsKey
+
+  # ── Secrets Manager - RDS master password ────────────────────────
+  RdsMasterSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ClusterName}/rds/master"
+      Description: RDS Postgres master credentials
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"gentrail"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        # Avoid all URL-special characters so postgres://user:pass@host/db
+        # parses cleanly without URL-encoding the password. The chart's
+        # rds-secret-job builds the DSN by string interpolation.
+        ExcludeCharacters: '"@/\\:?#&=+%[]{}|`<>,;()*^!$ '
+      KmsKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:role, Value: rds-master }
+
+  # ── DynamoDB tables (mirror real aigentrail-*-dev schemas) ────────
+  TracesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${DdbTableNamePrefix}-traces"
+      BillingMode: !Ref DdbBillingMode
+      AttributeDefinitions:
+        - { AttributeName: PK,     AttributeType: S }
+        - { AttributeName: SK,     AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI2PK, AttributeType: S }
+        - { AttributeName: GSI3PK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: agent-index
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: SK,     KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: eval-index
+          KeySchema:
+            - { AttributeName: GSI2PK, KeyType: HASH }
+            - { AttributeName: SK,     KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: span-index
+          KeySchema:
+            - { AttributeName: GSI3PK, KeyType: HASH }
+            - { AttributeName: SK,     KeyType: RANGE }
+          # KEYS_ONLY matches infra/ingestion: the only consumer
+          # (LookupTraceBySpanID) reads just the SK.
+          Projection: { ProjectionType: KEYS_ONLY }
+      # TTL + stream feed the trace archiver (ArchiverFn below), matching
+      # infra/ingestion: expired traces are removed from hot storage and the
+      # REMOVE stream event archives them to TraceArchiveBucket. Never enable
+      # TTL without the archiver: expiry would delete data with no cold copy.
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+      Tags:
+        - { Key: gentrail:table, Value: traces }
+
+  ViolationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${DdbTableNamePrefix}-violations"
+      BillingMode: !Ref DdbBillingMode
+      AttributeDefinitions:
+        - { AttributeName: PK,     AttributeType: S }
+        - { AttributeName: SK,     AttributeType: S }
+        - { AttributeName: GSI1PK, AttributeType: S }
+        - { AttributeName: GSI1SK, AttributeType: S }
+        - { AttributeName: GSI2PK, AttributeType: S }
+        - { AttributeName: GSI2SK, AttributeType: S }
+        - { AttributeName: GSI3PK, AttributeType: S }
+        - { AttributeName: GSI3SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      GlobalSecondaryIndexes:
+        - IndexName: org-recent-index
+          KeySchema:
+            - { AttributeName: GSI1PK, KeyType: HASH }
+            - { AttributeName: GSI1SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: rule-index
+          KeySchema:
+            - { AttributeName: GSI2PK, KeyType: HASH }
+            - { AttributeName: GSI2SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+        - IndexName: source-index
+          KeySchema:
+            - { AttributeName: GSI3PK, KeyType: HASH }
+            - { AttributeName: GSI3SK, KeyType: RANGE }
+          Projection: { ProjectionType: ALL }
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+      Tags:
+        - { Key: gentrail:table, Value: violations }
+
+  AgentStatsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${DdbTableNamePrefix}-agent-stats"
+      BillingMode: !Ref DdbBillingMode
+      AttributeDefinitions:
+        - { AttributeName: PK,     AttributeType: S }
+        - { AttributeName: org_id, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+      GlobalSecondaryIndexes:
+        - IndexName: org-index
+          KeySchema:
+            - { AttributeName: org_id, KeyType: HASH }
+          Projection: { ProjectionType: ALL }
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+      Tags:
+        - { Key: gentrail:table, Value: agent-stats }
+
+  PolicyRulesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${DdbTableNamePrefix}-policy-rules"
+      BillingMode: !Ref DdbBillingMode
+      AttributeDefinitions:
+        - { AttributeName: PK, AttributeType: S }
+        - { AttributeName: SK, AttributeType: S }
+      KeySchema:
+        - { AttributeName: PK, KeyType: HASH }
+        - { AttributeName: SK, KeyType: RANGE }
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+      Tags:
+        - { Key: gentrail:table, Value: policy-rules }
+
+  ApiKeysTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub "${DdbTableNamePrefix}-api-keys"
+      BillingMode: !Ref DdbBillingMode
+      AttributeDefinitions:
+        - { AttributeName: token, AttributeType: S }
+      KeySchema:
+        - { AttributeName: token, KeyType: HASH }
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+      Tags:
+        - { Key: gentrail:table, Value: api-keys }
+
+  # ── S3 buckets ────────────────────────────────────────────────────
+  EvidenceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ClusterName}-evidence-${AWS::AccountId}-${AWS::Region}"
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockEnabled: Enabled
+        Rule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: !Ref S3ObjectLockRetentionDays
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:role, Value: evidence }
+
+  TraceArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ClusterName}-trace-archive-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      # Same tiering as infra/ingestion's trace archive: warm for 90 days,
+      # GLACIER_IR to one year, DEEP_ARCHIVE beyond.
+      LifecycleConfiguration:
+        Rules:
+          - Id: archive-lifecycle
+            Status: Enabled
+            Transitions:
+              - { TransitionInDays: 90,  StorageClass: GLACIER_IR }
+              - { TransitionInDays: 365, StorageClass: DEEP_ARCHIVE }
+      Tags:
+        - { Key: gentrail:role, Value: trace-archive }
+
+  AlbLogsBucket:
+    Condition: EnableAlbAccessLogsCond
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ClusterName}-alb-logs-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        # ALB access-log delivery only accepts AES256, NOT SSE-KMS.
+        # Keep this bucket on AES256; protection is bucket-policy + BPA.
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      Tags:
+        - { Key: gentrail:role, Value: alb-logs }
+  AlbLogsBucketPolicy:
+    Condition: EnableAlbAccessLogsCond
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AlbLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowELBLogDelivery
+            Effect: Allow
+            Principal:
+              # ELB account ID per region. us-west-2 = 797873946194.
+              # For multi-region support, add a Mappings table by region.
+              AWS: !Sub "arn:aws:iam::797873946194:root"
+            Action: s3:PutObject
+            Resource: !Sub "${AlbLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+
+  VpcFlowLogsBucket:
+    Condition: EnableVpcFlowLogsCond
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ClusterName}-vpc-flow-logs-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration: { Status: Enabled }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:role, Value: vpc-flow-logs }
+
+  # ── RDS Postgres ─────────────────────────────────────────────────
+  RdsSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub "${ClusterName} RDS subnet group"
+      SubnetIds:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ]
+
+  RdsInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub "${ClusterName}-rds"
+      Engine: postgres
+      # Major-version only: RDS selects the latest supported 16.x at create time.
+      # Pinning a minor rots (AWS deprecates old minors and CreateDBInstance 400s).
+      EngineVersion: "16"
+      DBInstanceClass: !Ref RdsInstanceClass
+      AllocatedStorage: !Ref RdsAllocatedStorageGb
+      StorageEncrypted: true
+      KmsKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      MasterUsername: gentrail
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${RdsMasterSecret}:SecretString:password}}"
+      DBName: gentrail
+      DBSubnetGroupName: !Ref RdsSubnetGroup
+      VPCSecurityGroups: [ !Ref RdsSecurityGroup ]
+      MultiAZ: !Ref RdsMultiAz
+      BackupRetentionPeriod: !Ref RdsBackupRetentionDays
+      EnableCloudwatchLogsExports: !Ref RdsEnabledCloudwatchLogsExports
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      DeletionProtection: !Ref RdsDeletionProtection
+      EnablePerformanceInsights: !Ref EnableRdsPerformanceInsights
+      PerformanceInsightsKMSKeyId: !If
+        - EnableRdsPerformanceInsightsCond
+        - !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+        - !Ref AWS::NoValue
+      Tags:
+        - { Key: gentrail:role, Value: rds-postgres }
+
+  # ── EKS cluster ──────────────────────────────────────────────────
+  EksClusterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: eks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSClusterPolicy
+
+  EksCluster:
+    Type: AWS::EKS::Cluster
+    Properties:
+      Name: !Ref ClusterName
+      Version: !Ref EksVersion
+      RoleArn: !GetAtt EksClusterRole.Arn
+      ResourcesVpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet0
+          - !Ref PrivateSubnet1
+          - !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ]
+          - !Ref PublicSubnet0
+          - !Ref PublicSubnet1
+          - !If [ ThreeOrMoreAzs, !Ref PublicSubnet2, !Ref AWS::NoValue ]
+        EndpointPublicAccess: true
+        EndpointPrivateAccess: true
+        PublicAccessCidrs: [ !Ref AllowedIngressCidr ]
+      Logging:
+        ClusterLogging:
+          EnabledTypes:
+            - { Type: api }
+            - { Type: audit }
+            - { Type: authenticator }
+            - { Type: controllerManager }
+            - { Type: scheduler }
+      EncryptionConfig:
+        - Resources: [ secrets ]
+          Provider:
+            KeyArn: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:role, Value: eks-cluster }
+
+  # OIDC provider for IRSA
+  EksOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+      ClientIdList: [ "sts.amazonaws.com" ]
+      ThumbprintList:
+        # AWS-published EKS OIDC thumbprint; rotates very rarely.
+        # Refresh from EKS docs if IRSA breaks.
+        - "9e99a48a9960b14926bb7f3b02e22da2b0ab7280"
+
+  # ── Managed node group ───────────────────────────────────────────
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  NodeLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ClusterName}-node-lt"
+      LaunchTemplateData:
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 50
+              VolumeType: gp3
+              Encrypted: true
+              KmsKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+              DeleteOnTermination: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpPutResponseHopLimit: 2
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "${ClusterName}-node" }
+
+  NodeGroup:
+    Type: AWS::EKS::Nodegroup
+    Properties:
+      ClusterName: !Ref EksCluster
+      NodeRole: !GetAtt NodeRole.Arn
+      ScalingConfig:
+        MinSize: !Ref NodeCountMin
+        DesiredSize: !Ref NodeCountDesired
+        MaxSize: !Ref NodeCountMax
+      InstanceTypes: [ !Ref NodeInstanceType ]
+      Subnets:
+        - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ]
+      LaunchTemplate:
+        Id: !Ref NodeLaunchTemplate
+        Version: !GetAtt NodeLaunchTemplate.LatestVersionNumber
+      Labels:
+        gentrail.io/role: workload
+      Tags:
+        gentrail:role: eks-node
+
+  # ── EBS CSI driver addon (required for PersistentVolumeClaims) ───
+  # Without this addon, every PVC stays Pending and any pod with a
+  # PVC won't schedule. Default-EKS doesn't include it.
+  EbsCsiIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
+      Tags:
+        - { Key: gentrail:service-account, Value: ebs-csi-controller-sa }
+
+  EbsCsiAddon:
+    Type: AWS::EKS::Addon
+    DependsOn: NodeGroup
+    Properties:
+      ClusterName: !Ref EksCluster
+      AddonName: aws-ebs-csi-driver
+      ServiceAccountRoleArn: !GetAtt EbsCsiIrsaRole.Arn
+      ResolveConflicts: OVERWRITE
+
+  # ── IRSA: one role per service ───────────────────────────────────
+  DashboardIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:gentrail:dashboard",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: dashboard-data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DdbReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt TracesTable.Arn
+                  - !Sub "${TracesTable.Arn}/index/*"
+                  - !GetAtt ViolationsTable.Arn
+                  - !Sub "${ViolationsTable.Arn}/index/*"
+                  - !GetAtt AgentStatsTable.Arn
+                  - !Sub "${AgentStatsTable.Arn}/index/*"
+                  - !GetAtt PolicyRulesTable.Arn
+                  - !GetAtt ApiKeysTable.Arn
+              - Sid: EvidenceS3
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${EvidenceBucket.Arn}/*"
+              - Sid: EvidenceBucketList
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt EvidenceBucket.Arn
+              - Sid: KmsDecrypt
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+              - Sid: RdsSecret
+                Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref RdsMasterSecret
+              # The dashboard's cloud-scanner assumes GentrailReadOnlyRole in a
+              # target account to enumerate Bedrock agents + run compliance
+              # checks. In same-account BYOC the target is this account; the
+              # scanner role's trust is governed by VendorAccountId.
+              - Sid: AssumeScannerRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !GetAtt GentrailReadOnlyRole.Arn
+      Tags:
+        - { Key: gentrail:service-account, Value: dashboard }
+
+  PolicyEngineIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:gentrail:policy-engine",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: policy-engine-bedrock
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource: !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}"
+      Tags:
+        - { Key: gentrail:service-account, Value: policy-engine }
+
+  # ── ALB Controller IRSA role ────────────────────────────────────
+  AlbControllerIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      # Inline policy attached at install time by deploy/m3/scripts/install-alb-controller.sh
+      # (downloads the latest upstream IAM policy from kubernetes-sigs/aws-load-balancer-controller).
+      Tags:
+        - { Key: gentrail:service-account, Value: aws-load-balancer-controller }
+
+  # ── Cross-account trust role (vendor compliance scanners) ────────
+  # Used by the dashboard's awsclient scanner suite to read compliance
+  # posture in this account. Gated by ExternalId. Read-only (no write
+  # actions anywhere). Surfaced as the GentrailReadOnlyRoleArn output —
+  # email that + your ExternalId to the Gentrail vendor.
+  GentrailReadOnlyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "gentrail-readonly-${AWS::Region}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${VendorAccountId}:root"
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+      MaxSessionDuration: 3600
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+        - arn:aws:iam::aws:policy/SecurityAudit
+      Tags:
+        - { Key: gentrail:scope, Value: trust-role }
+
+  # ── RDS Secret Bootstrap IRSA role (for the helm pre-install hook) ───
+  RdsBootstrapIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:gentrail:rds-secret-bootstrap",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: rds-bootstrap-data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref RdsMasterSecret
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:service-account, Value: rds-secret-bootstrap }
+
+  # ── Evaluator IRSA role (k8s consumer, replaces the evaluator Lambda) ──
+  EvaluatorIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:gentrail:evaluator",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: evaluator-data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DdbReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt TracesTable.Arn
+                  - !Sub "${TracesTable.Arn}/index/*"
+                  - !GetAtt ViolationsTable.Arn
+                  - !Sub "${ViolationsTable.Arn}/index/*"
+                  - !GetAtt AgentStatsTable.Arn
+                  - !Sub "${AgentStatsTable.Arn}/index/*"
+                  - !GetAtt PolicyRulesTable.Arn
+              - Sid: KmsDecrypt
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:service-account, Value: evaluator }
+
+  # ── Authproxy IRSA role (k8s ingest, replaces the authproxy Lambda) ──
+  AuthproxyIrsaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument: !Sub
+        - |
+          {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": { "Federated": "${OidcArn}" },
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Condition": {
+                "StringEquals": {
+                  "${OidcUrl}:sub": "system:serviceaccount:gentrail:authproxy",
+                  "${OidcUrl}:aud": "sts.amazonaws.com"
+                }
+              }
+            }]
+          }
+        - OidcArn: !GetAtt EksOidcProvider.Arn
+          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
+      Policies:
+        - PolicyName: authproxy-data-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DdbReadWrite
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt TracesTable.Arn
+                  - !Sub "${TracesTable.Arn}/index/*"
+                  - !GetAtt AgentStatsTable.Arn
+                  - !Sub "${AgentStatsTable.Arn}/index/*"
+                  - !GetAtt ApiKeysTable.Arn
+              - Sid: KmsDecrypt
+                Effect: Allow
+                Action: kms:Decrypt
+                Resource: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+      Tags:
+        - { Key: gentrail:service-account, Value: authproxy }
+
+  # ── ACM cert (conditional) ──────────────────────────────────────
+  AcmCertificate:
+    Condition: CreateAcmCert
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref Hostname
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref Hostname
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - { Key: gentrail:role, Value: alb-cert }
+
+  # Note: ALB itself is created by the AWS Load Balancer Controller from
+  # the Ingress resource in the Helm chart - NOT here. The Route 53 alias
+  # record is created post-helm-install via a one-line aws CLI command
+  # documented in the runbook (Task 23).
+
+  # ── Trace archiver (DDB stream → S3, parity with infra/ingestion) ─
+  ArchiverRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ClusterName}-trace-archiver"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: dynamodb-streams
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:DescribeStream
+                  - dynamodb:ListStreams
+                Resource: !Sub "${TracesTable.Arn}/stream/*"
+        - PolicyName: s3-archive-write
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${TraceArchiveBucket.Arn}/*"
+        # Unlike Gentrail cloud (AWS-owned table keys), the substrate tables
+        # and buckets are CMK-encrypted: reading the stream needs Decrypt,
+        # writing SSE-KMS archive objects needs GenerateDataKey.
+        - PolicyName: kms-substrate
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+
+  ArchiverFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ClusterName}-trace-archiver"
+      Runtime: provided.al2023
+      Architectures: [ arm64 ]
+      Handler: bootstrap
+      MemorySize: 128
+      Timeout: 60
+      Role: !GetAtt ArchiverRole.Arn
+      Code:
+        S3Bucket: !Ref ArchiverCodeS3Bucket
+        S3Key: !Ref ArchiverCodeS3Key
+      Environment:
+        Variables:
+          ARCHIVE_BUCKET: !Ref TraceArchiveBucket
+      Tags:
+        - { Key: gentrail:role, Value: trace-archiver }
+
+  ArchiverStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !GetAtt TracesTable.StreamArn
+      FunctionName: !GetAtt ArchiverFn.Arn
+      StartingPosition: LATEST
+      BatchSize: 100
+      MaximumBatchingWindowInSeconds: 30
+      FilterCriteria:
+        Filters:
+          - Pattern: '{"eventName":["REMOVE"]}'
+
+  # ── Bedrock-model validator ──────────────────────────────────────
+  BedrockValidatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: bedrock-list-models
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock:ListFoundationModels
+                Resource: "*"
+
+  BedrockValidatorFn:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ClusterName}-bedrock-validator"
+      Runtime: python3.12
+      # Inline ZipFile lands as `index.py` in the Lambda env — Handler must
+      # be `index.handler`, NOT `handler.handler`. The standalone handler.py
+      # file in deploy/m3/cfn/lambda/bedrock-validator/ is for future cfn-package
+      # builds; keep both in sync but only `index.handler` works for inline ZipFile.
+      Handler: index.handler
+      Role: !GetAtt BedrockValidatorRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json, urllib.request, boto3
+          def _r(e, c, s, r):
+              b = json.dumps({"Status": s, "Reason": r, "PhysicalResourceId": e.get("PhysicalResourceId") or c.log_stream_name, "StackId": e["StackId"], "RequestId": e["RequestId"], "LogicalResourceId": e["LogicalResourceId"], "Data": {}}).encode()
+              urllib.request.urlopen(urllib.request.Request(e["ResponseURL"], data=b, method="PUT", headers={"Content-Type": "", "Content-Length": str(len(b))})).read()
+          def handler(e, c):
+              if e["RequestType"] == "Delete":
+                  return _r(e, c, "SUCCESS", "delete-noop")
+              m, r = e["ResourceProperties"]["BedrockModelId"], e["ResourceProperties"]["Region"]
+              # Advisory only: a model-access gap must not block substrate
+              # provisioning. The policy engine is the sole Bedrock consumer and is
+              # enabled separately, so surface a WARNING in the stack events (visible
+              # on the CustomResource) instead of FAILING the whole stack.
+              try:
+                  ids = {x["modelId"] for x in boto3.client("bedrock", region_name=r).list_foundation_models()["modelSummaries"]}
+              except Exception as ex:
+                  return _r(e, c, "SUCCESS", f"WARNING: could not verify Bedrock access in {r} ({ex}); enable model access before using the policy engine")
+              if m not in ids:
+                  return _r(e, c, "SUCCESS", f"WARNING: Bedrock model {m!r} not enabled in {r}; enable model access before using the policy engine. First 5 available: {sorted(ids)[:5]}")
+              _r(e, c, "SUCCESS", f"model {m} available in {r}")
+
+  BedrockModelValidation:
+    Type: Custom::BedrockModelValidator
+    Properties:
+      ServiceToken: !GetAtt BedrockValidatorFn.Arn
+      BedrockModelId: !Ref BedrockModelId
+      Region: !Ref AWS::Region
+
+Outputs:
+  ClusterName:
+    Description: EKS cluster name (used by aws eks update-kubeconfig)
+    Value: !Ref EksCluster
+    Export: { Name: !Sub "${AWS::StackName}-ClusterName" }
+  ClusterEndpoint:
+    Value: !GetAtt EksCluster.Endpoint
+  OidcIssuerUrl:
+    Description: EKS OIDC issuer URL (for IRSA)
+    Value: !GetAtt EksCluster.OpenIdConnectIssuerUrl
+
+  VpcId:
+    Value: !Ref Vpc
+  PrivateSubnetIds:
+    Description: Comma-separated private subnet IDs
+    Value: !Join
+      - ","
+      - - !Ref PrivateSubnet0
+        - !Ref PrivateSubnet1
+        - !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, "" ]
+  PublicSubnetIds:
+    Description: Comma-separated public subnet IDs
+    Value: !Join
+      - ","
+      - - !Ref PublicSubnet0
+        - !Ref PublicSubnet1
+        - !If [ ThreeOrMoreAzs, !Ref PublicSubnet2, "" ]
+
+  KmsKeyArn:
+    Description: Substrate KMS key ARN (Helm value -> kms.keyArn)
+    Value: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+
+  TraceArchiveBucketName:
+    Description: Cold-tier bucket where TTL-expired traces are archived
+    Value: !Ref TraceArchiveBucket
+
+  RdsEndpoint:
+    Description: RDS Postgres endpoint:port (Helm value -> rds.endpoint)
+    Value: !Sub "${RdsInstance.Endpoint.Address}:${RdsInstance.Endpoint.Port}"
+  RdsSecretArn:
+    Description: Secrets Manager secret holding the RDS master password
+    Value: !Ref RdsMasterSecret
+
+  EvidenceBucketName:
+    Description: S3 bucket holding compliance evidence (Helm value -> s3.evidenceBucket)
+    Value: !Ref EvidenceBucket
+  AlbLogsBucketName:
+    Condition: EnableAlbAccessLogsCond
+    Value: !Ref AlbLogsBucket
+  VpcFlowLogsBucketName:
+    Condition: EnableVpcFlowLogsCond
+    Value: !Ref VpcFlowLogsBucket
+
+  DdbTablePrefix:
+    Value: !Ref DdbTableNamePrefix
+
+  AcmCertArn:
+    Description: ACM cert ARN (created here or BYO)
+    Value: !If [ CreateAcmCert, !Ref AcmCertificate, !Ref ExistingAcmCertArn ]
+
+  Hostname:
+    Value: !Ref Hostname
+
+  OtelHostname:
+    Value: !Ref OtelHostname
+
+  BedrockModelId:
+    Value: !Ref BedrockModelId
+
+  # IRSA role ARNs (Helm chart annotations)
+  DashboardIrsaRoleArn:    { Value: !GetAtt DashboardIrsaRole.Arn }
+  PolicyEngineIrsaRoleArn: { Value: !GetAtt PolicyEngineIrsaRole.Arn }
+  EvaluatorIrsaRoleArn:    { Value: !GetAtt EvaluatorIrsaRole.Arn }
+  AuthproxyIrsaRoleArn:    { Value: !GetAtt AuthproxyIrsaRole.Arn }
+  AlbControllerIrsaRoleArn: { Value: !GetAtt AlbControllerIrsaRole.Arn }
+  RdsBootstrapIrsaRoleArn: { Value: !GetAtt RdsBootstrapIrsaRole.Arn }
+
+  GentrailReadOnlyRoleArn:
+    Description: Cross-account vendor scanner role ARN — email this + your ExternalId to support@gentrail.ai
+    Value: !GetAtt GentrailReadOnlyRole.Arn

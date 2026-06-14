@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "nats") .) | indent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "nats") .) | indent 4 }}
+  ports:
+    - { name: client, port: 4222, targetPort: client }
+    - { name: monitor, port: 8222, targetPort: monitor }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nats-headless
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "nats") .) | indent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "nats") .) | indent 4 }}
+  ports:
+    - { name: client, port: 4222, targetPort: client }
+    - { name: cluster, port: 6222, targetPort: cluster }
+    - { name: monitor, port: 8222, targetPort: monitor }

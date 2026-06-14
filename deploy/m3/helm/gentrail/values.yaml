@@ -1,0 +1,132 @@
+# Defaults — all CFN-output-derived keys are left empty so a value injected
+# by cfn-to-values.sh wins via -f override.
+
+aws:
+  region: ""
+  # Allow pod egress to the IMDS endpoint for node-role credentials. Set false
+  # when pods get credentials via IRSA instead.
+  imdsEgress: true
+  # Inject the IRSA projected SA token + AWS web-identity env into pods directly.
+  # True on k3s (no pod-identity webhook). Set false on EKS, where the managed
+  # webhook injects them natively from the ServiceAccount role-arn annotation.
+  irsaInjectToken: true
+
+# Chart owns the namespace. Set false when the runner pre-creates it (so the
+# license Secret and init-aws ConfigMap can land before install).
+createNamespace: true
+
+image:
+  registry: ghcr.io/aigentrail
+  tag: v0.2.0-rc.4
+  pullPolicy: IfNotPresent
+  pullSecret: ""
+
+ingress:
+  host: ""
+  certArn: ""
+  otelHost: "" # OTLP ingest FQDN for the authproxy (otel.aigentrail.com)
+
+# PVC storage class. "" uses the cluster default (k3s local-path); set gp2 on EKS.
+storage:
+  class: ""
+
+ddb:
+  tablePrefix: gentrail
+  tableSuffix: "" # appended after the table name, e.g. "-dev" for aigentrail-traces-dev
+  endpoint: "" # "" = real AWS DynamoDB via IRSA; set to dynamodb-local for local mode
+
+# Renders in-cluster DynamoDB-local + Postgres + table init so the chart runs
+# end to end without AWS. See values-local.yaml. Never enable for a cloud install.
+local:
+  enabled: false
+
+# Default-deny + per-component allows. Disable for local clusters whose CNI
+# enforces policies but where the prod 443/IRSA egress shape does not apply.
+networkPolicies:
+  enabled: true
+
+s3:
+  evidenceBucket: ""
+
+rds:
+  endpoint: ""
+  secretArn: ""
+  # true: a pre-install Job mints gentrail-rds-secret from Secrets Manager via
+  # IRSA (EKS). false: the secret is supplied externally (local mode, or k3s
+  # where OpenTofu creates it) since k3s has no IRSA.
+  bootstrap: true
+
+# In-cluster Cloudflare Tunnel ingress (k3s): cloudflared connects out to
+# Cloudflare and routes the configured hostnames to the in-cluster Services.
+# Run >1 replica for edge HA. The tunnel's ingress rules are managed remotely.
+cloudflared:
+  enabled: false
+  replicaCount: 2
+  image: cloudflare/cloudflared:2024.10.0
+  tokenSecretRef: gentrail-cloudflared
+
+kms:
+  keyArn: ""
+
+llm:
+  provider: bedrock
+  model: ""
+
+irsa:
+  dashboard: ""
+  policyEngine: ""
+  rdsBootstrap: ""
+  evaluator: ""
+  authproxy: ""
+
+license:
+  secretRef: gentrail-license
+
+audit:
+  pvcSize: 10Gi
+
+dashboard:
+  replicaCount: 2
+  # Set false to run a read-only dashboard (no heartbeat/evidence writes) when
+  # a second stack shares this RDS during an incremental cutover.
+  auditLoop: true
+  # Match the live env to share the session cookie (SSO across hosts, and
+  # existing sessions survive a hostname cutover). Unset falls back to a
+  # host-only cookie signed with the built-in "dev" secret.
+  cookieDomain: ""
+  sessionSecretName: ""   # k8s secret holding key "session-secret"
+  # Dev-only /admin/orgs lifecycle; the BYOC binary excludes the routes at compile time.
+  adminTokenSecretName: ""   # k8s secret holding key "admin-token"
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+# Likewise, policy-engine integrates Bedrock as part of SP5 — until then,
+# stay at 0 replicas. The dashboard works fine without it for SP2's
+# trace-ingestion-only feature surface.
+policyEngine:
+  replicaCount: 0
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits:   { cpu: 1000m, memory: 1Gi }
+
+# replicas sets both the NATS cluster size and the EVENTS stream replica factor.
+# 1 for a single-node env, 3 for the HA BYOC cluster.
+nats:
+  replicas: 1
+  jetstreamSize: 5Gi
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 512Mi }
+
+evaluator:
+  replicaCount: 1
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 350Mi }
+
+authproxy:
+  replicaCount: 1
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { cpu: 500m, memory: 350Mi }

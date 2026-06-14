@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nats
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "nats") .) | indent 4 }}
+data:
+  nats.conf: |
+    port: 4222
+    http: 8222
+    jetstream {
+      store_dir: /data
+    }
+    {{- if gt (int .Values.nats.replicas) 1 }}
+    cluster {
+      name: gentrail
+      port: 6222
+      routes: [
+      {{- range $i := until (int .Values.nats.replicas) }}
+        nats://nats-{{ $i }}.nats-headless.{{ $.Release.Namespace }}.svc:6222
+      {{- end }}
+      ]
+    }
+    {{- end }}

@@ -1,0 +1,29 @@
+# Overrides to run the chart on a local k3s/k3d cluster with no AWS. The runner
+# (run-k3s-helm.sh) builds + imports the images, creates the init-aws ConfigMap
+# (from the canonical init-aws.sh) and the gentrail-license Secret, then:
+#   helm install gentrail . -f values-local.yaml
+
+aws:
+  region: us-west-2
+
+createNamespace: false
+
+image:
+  registry: docker.io/gentrail
+  tag: dev
+  pullPolicy: Never
+
+ddb:
+  endpoint: http://dynamodb-local:8000
+
+local:
+  enabled: true
+
+networkPolicies:
+  enabled: false
+
+nats:
+  replicas: 1
+
+policyEngine:
+  replicaCount: 1
