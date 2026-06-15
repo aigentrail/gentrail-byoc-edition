@@ -1,19 +1,22 @@
-# Gentrail BYOC — install
+# Gentrail BYOC
 
-Run the whole stack in your own AWS account. Internal by default: private ALBs,
-no public domain, no login (the install is single-tenant, so the cluster network
-is the access boundary). One script, then paste your license in the dashboard.
+> [!WARNING]
+> Work in progress. Scripts, image tags, and interfaces may change without
+> notice, and this is not yet production ready. Expect rough edges.
 
-## 1. Get your free license
+Run the full Gentrail stack in your own AWS account. Internal by default: private
+ALBs, no public domain, and no login, so the cluster network is your access
+boundary. One script, then paste your license in the dashboard.
 
-Get one at https://gentrail.ai/license: a short form returns a free BYOC
-evaluation license (10 agents, 60 days), shown on the page and emailed to you.
-You paste it into the dashboard after install - nothing to create up front.
+## 1. Get a license
+
+Get a free evaluation license (10 agents, 60 days) at https://gentrail.ai/license.
+You paste it into the dashboard after install; there is nothing to set up first.
 
 ## 2. Prerequisites
 
-- An AWS account with **CloudFormation, EKS, KMS, IAM, RDS, S3** rights, with the
-  CLI authenticated to it (`aws sts get-caller-identity` works).
+- An AWS account with CloudFormation, EKS, KMS, IAM, RDS, and S3 rights, with the
+  CLI authenticated (`aws sts get-caller-identity` works).
 - `aws` (v2.17+), `kubectl`, `helm` (v3.13+), and `jq` on your PATH.
 
 ## 3. Install
@@ -21,119 +24,49 @@ You paste it into the dashboard after install - nothing to create up front.
 ```bash
 git clone https://github.com/aigentrail/gentrail-byoc-edition.git
 cd gentrail-byoc-edition
-./install.sh                  # ~30 min: substrate (EKS + RDS) + the chart
+./install.sh
 ```
 
-Optional env vars:
-
-| var | default | purpose |
-|-----|---------|---------|
-| `REGION` | `us-west-2` | AWS region |
-| `STACK` | `gentrail` | stack / cluster name |
-| `GHCR_USER` + `GHCR_TOKEN` | — | a `read:packages` token, only if the images are private |
-| `PUBLIC_HOST` (+ `PUBLIC_OTEL_HOST`) | — | do a public, internet-facing install instead of internal |
-| `IMAGE_TAG` | the chart's pin | override the image version |
-
-`install.sh` stages the template, stands up the substrate, installs the AWS Load
-Balancer Controller + a default StorageClass, and installs the chart (which
-auto-provisions an empty license secret). It is idempotent — re-run it to upgrade
+This takes about 30 minutes. It stages the CloudFormation template, stands up the
+EKS and RDS substrate, installs the AWS Load Balancer Controller and a default
+StorageClass, then installs the chart. It is idempotent, so re-run it to upgrade
 in place.
 
-## 4. Open the dashboard and add your license
+Optional env vars: `REGION` (default us-west-2), `STACK` (default gentrail),
+`IMAGE_TAG` (override the pinned version), and `PUBLIC_HOST` with
+`PUBLIC_OTEL_HOST` for a public, internet-facing install instead of the internal
+default.
 
-There is no login. The ALBs are internal, so reach the dashboard over your VPC /
-VPN, or port-forward it:
+## 4. Open the dashboard
+
+There is no login. Reach the internal ALB over your VPC or VPN, or port-forward
+it:
 
 ```bash
 kubectl -n gentrail port-forward deploy/dashboard 8001:8001   # http://localhost:8001
 ```
 
-With no license yet, every page redirects to the license input. Paste your
-license; it is written to the provisioned secret and every service activates
-within about two minutes.
+Every page redirects to the license input until you paste your license. Once you
+do, it is written to the mounted secret and every service activates within about
+two minutes.
 
-## 5. Send your first trace (SDK quickstart, ~5 min)
+## 5. Send a trace
 
-Generate a key, run a tiny agent, watch it appear.
+Generate an API key in the dashboard (Integrations, then API keys), install the
+SDK, and run an agent pointed at your install. See the SDK quickstart at
+https://github.com/aigentrail/sdk.
 
-1. **Generate an API key.** In the dashboard open Integrations, then API keys,
-   and generate a key. Copy it.
+## License
 
-2. **Install the SDK** into your agent's Python environment:
+The license is an Ed25519-signed JWT. Paste it or a renewal on the dashboard's
+License page; it verifies locally and hot-reloads every service with no restarts.
+You get a renewal banner within 30 days of expiry. At expiry the install goes
+read-only: reads keep working, writes are refused, and nothing is deleted, until
+you install a new license.
 
-   ```bash
-   pip install aigentrail
-   ```
-
-3. **Point the SDK at your install and run a sample agent.** Save this as
-   `first_agent.py`:
-
-   ```python
-   from aigentrail import get_governance_tracer
-
-   tracer = get_governance_tracer()  # reads AIGENTRAIL_API_KEY + endpoint from env
-   if tracer is None:
-       raise SystemExit("AIGENTRAIL_API_KEY not set, or opentelemetry not installed")
-
-   tracer.record_llm_call(
-       agent_id="hello-agent",
-       agent_name="Hello Agent",
-       model_id="anthropic.claude-sonnet-4-5-20250929-v1:0",
-       prompt="What is the capital of France?",
-       response_text="Paris.",
-       input_tokens=8,
-       output_tokens=2,
-       total_tokens=10,
-   )
-   tracer.force_flush()  # flush before the process exits
-   print("sent one invocation")
-   ```
-
-   Point it at the ingest endpoint and run it (port-forward is easiest for a
-   quick check; in production use the internal ALB DNS):
-
-   ```bash
-   kubectl -n gentrail port-forward deploy/authproxy 4318:4318 &
-   export AIGENTRAIL_API_KEY=<the-key-from-step-1>
-   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-   python3 first_agent.py
-   ```
-
-4. **See it land.** `hello-agent` shows up under Agents within a few seconds,
-   with the invocation and model call in its trace viewer. Watch the pipeline:
-   `kubectl -n gentrail logs deploy/evaluator -f`. That's one of your 10
-   free-tier agents.
-
-If the agent doesn't appear: confirm the API key is active and that
-`OTEL_EXPORTER_OTLP_ENDPOINT` reaches the authproxy.
-
-## License lifecycle
-
-The license is an Ed25519-signed JWT. An org admin pastes it (or a renewal) on
-the dashboard's License page; it verifies locally, patches the one mounted
-secret, and every service hot-reloads within about two minutes — no restarts.
-
-- **Pre-expiry:** services log `license: valid … expires_in=N days`.
-- **Within 30 days:** a renewal banner + `WARN license: expires in N days` so your
-  log aggregator can escalate.
-- **At expiry:** the install goes **read-only** — reads keep working, new writes
-  are refused, nothing is deleted. Install a new license to resume.
-
-A present-but-invalid license (unparseable / bad signature / `nbf` in the future)
-fails a service at startup; a *missing* one is fine — the install runs unlicensed
-and waits for you to paste one. There is no online revocation.
-
-## Free tier (10 agents, 60 days)
-
-Full observability (trace ingestion, agent inventory, trace viewer, policy /
-violation detection) and the dashboard, for 60 days with up to 10 agents.
-
-- **Agent cap:** past 10 distinct agents, new agents' traces are dropped at the
-  ingest front door (the request still succeeds, so the SDK isn't interrupted)
-  and a dashboard banner reports the suppressed count. The first 10 keep flowing.
-- **60-day expiry → read-only:** at the license `exp` the install goes read-only
-  (reads work, ingestion returns 402, no data deleted), with countdown banners at
-  30 / 14 / 7 / 1 days. Installing a new license clears it, non-destructively.
+Free tier covers full observability and the dashboard for 60 days with up to 10
+agents. Past 10 agents, new agents' traces are dropped at ingest (the request
+still succeeds) and a banner reports the suppressed count.
 
 ## Uninstall
 
@@ -141,18 +74,11 @@ violation detection) and the dashboard, for 60 days with up to 10 agents.
 deploy/m3/scripts/uninstall.sh gentrail
 ```
 
-Follow the prompts. KMS-key deletion is the irreversible step that makes all
-SSE-KMS-encrypted backups permanently unreadable.
+Follow the prompts. The final step schedules the KMS key for deletion, which is
+irreversible and makes all SSE-KMS-encrypted backups permanently unreadable.
 
-## Recovering from a failed install
+## Hardening
 
-Retained resources (S3, DynamoDB, KMS, RDS snapshots) survive a failed `create`,
-so a retry fails early on "already exists". To recover: delete the stack
-(`aws cloudformation delete-stack`), then remove the retained RDS instance,
-DynamoDB tables, and S3 buckets for the stack, and re-run `install.sh`.
-
-## Hardening checklist (first 24 hours)
-
-1. **Restrict dashboard + ingest access** to your VPN / corporate CIDR — the
-   install is single-tenant with no login, so the network is the access boundary.
-2. **Confirm CloudTrail is on** and **forward CloudWatch logs to your SIEM**.
+The install is single-tenant with no login, so the network is your boundary.
+Restrict dashboard and ingest access to your VPN or corporate CIDR, confirm
+CloudTrail is on, and forward logs to your SIEM.
