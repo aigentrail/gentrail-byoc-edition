@@ -31,12 +31,22 @@ CLUSTER="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$R
 echo "==> kubeconfig for cluster '$CLUSTER' ($REGION)"
 aws eks update-kubeconfig --name "$CLUSTER" --region "$REGION" >/dev/null
 
-cleanup() { kill $(jobs -p) 2>/dev/null || true; }
+cleanup() { trap - EXIT INT TERM; kill 0; }
 trap cleanup EXIT INT TERM
 
+# A port-forward targets a single pod, so it drops when that pod is replaced (a
+# rolling upgrade, a restart, a transient blip). Reconnect so the local link
+# survives pod rolls instead of dying and needing a manual restart.
+forward() {
+  while true; do
+    kubectl -n "$NAMESPACE" port-forward "$1" "$2" >/dev/null 2>&1 || true
+    sleep 1
+  done
+}
+
 kubectl -n "$NAMESPACE" rollout status deploy/dashboard --timeout=120s >/dev/null 2>&1 || true
-kubectl -n "$NAMESPACE" port-forward deploy/dashboard "$DASH_PORT:8001" >/dev/null 2>&1 &
-kubectl -n "$NAMESPACE" port-forward deploy/authproxy "$OTEL_PORT:4318" >/dev/null 2>&1 &
+forward deploy/dashboard "$DASH_PORT:8001" &
+forward deploy/authproxy "$OTEL_PORT:4318" &
 sleep 3
 
 cat <<EOF

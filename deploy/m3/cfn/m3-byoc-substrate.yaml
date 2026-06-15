@@ -1244,7 +1244,11 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:PutObject
-                  - s3:DeleteObject
+                  # Object-lock retention is how evidence is WORM-locked at upload
+                  # and extended; without it a BYOC install cannot lock evidence.
+                  # DeleteObject is intentionally absent: the bucket is governance
+                  # object-locked and the app never deletes evidence.
+                  - s3:PutObjectRetention
                 Resource: !Sub "${EvidenceBucket.Arn}/*"
               - Sid: EvidenceBucketList
                 Effect: Allow
@@ -1259,15 +1263,14 @@ Resources:
                 Action: secretsmanager:GetSecretValue
                 Resource: !Ref RdsMasterSecret
               # The cloud-scanner assumes GentrailReadOnlyRole to enumerate
-              # Bedrock agents + run compliance checks. Only present when the
-              # scanner is enabled (paid); free installs omit it entirely.
-              - !If
-                - EnableScanner
-                - Sid: AssumeScannerRole
-                  Effect: Allow
-                  Action: sts:AssumeRole
-                  Resource: !GetAtt GentrailReadOnlyRole.Arn
-                - !Ref "AWS::NoValue"
+              # Bedrock agents + run compliance checks against this account
+              # (own-account scan, free tier). Referenced by constructed name,
+              # not !GetAtt: the scanner role trusts this dashboard role, so a
+              # !GetAtt back to it would be a circular dependency.
+              - Sid: AssumeScannerRole
+                Effect: Allow
+                Action: sts:AssumeRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/gentrail-readonly-${AWS::Region}"
       Tags:
         - { Key: gentrail:service-account, Value: dashboard }
 
@@ -1342,19 +1345,29 @@ Resources:
   # email that + your ExternalId to the Gentrail vendor.
   GentrailReadOnlyRole:
     Type: AWS::IAM::Role
-    Condition: EnableScanner
     Properties:
       RoleName: !Sub "gentrail-readonly-${AWS::Region}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
+          # Own-account scan (free tier): the in-account dashboard assumes this
+          # to read the local account. The principal is a specific same-account
+          # role, so no external ID is needed for confused-deputy protection.
           - Effect: Allow
             Principal:
-              AWS: !Sub "arn:aws:iam::${VendorAccountId}:root"
+              AWS: !GetAtt DashboardIrsaRole.Arn
             Action: sts:AssumeRole
-            Condition:
-              StringEquals:
-                sts:ExternalId: !Ref ExternalId
+          # Cross-account vendor scan (paid): only when an ExternalId is set.
+          - !If
+            - EnableScanner
+            - Effect: Allow
+              Principal:
+                AWS: !Sub "arn:aws:iam::${VendorAccountId}:root"
+              Action: sts:AssumeRole
+              Condition:
+                StringEquals:
+                  sts:ExternalId: !Ref ExternalId
+            - !Ref "AWS::NoValue"
       MaxSessionDuration: 3600
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/ReadOnlyAccess
@@ -1428,13 +1441,11 @@ Resources:
               - Sid: DdbReadWrite
                 Effect: Allow
                 Action:
-                  - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:Scan
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:BatchGetItem
-                  - dynamodb:BatchWriteItem
                 Resource:
                   - !GetAtt TracesTable.Arn
                   - !Sub "${TracesTable.Arn}/index/*"
@@ -1482,7 +1493,6 @@ Resources:
                 Action:
                   - dynamodb:GetItem
                   - dynamodb:Query
-                  - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:BatchWriteItem
                 Resource:
@@ -1742,6 +1752,5 @@ Outputs:
   RdsBootstrapIrsaRoleArn: { Value: !GetAtt RdsBootstrapIrsaRole.Arn }
 
   GentrailReadOnlyRoleArn:
-    Condition: EnableScanner
-    Description: Cross-account vendor scanner role ARN — email this + your ExternalId to support@gentrail.ai
+    Description: Read-only scanner role the dashboard assumes to scan this account; for the cross-account vendor path, email this + your ExternalId to support@gentrail.ai
     Value: !GetAtt GentrailReadOnlyRole.Arn

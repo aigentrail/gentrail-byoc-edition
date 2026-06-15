@@ -71,11 +71,12 @@ still succeeds) and a banner reports the suppressed count.
 ## Uninstall
 
 ```bash
-deploy/m3/scripts/uninstall.sh gentrail
+./teardown.sh                 # add STACK=<name> if you changed it at install
 ```
 
-Follow the prompts. The final step schedules the KMS key for deletion, which is
-irreversible and makes all SSE-KMS-encrypted backups permanently unreadable.
+Confirms once, then removes the chart, the substrate (EKS + RDS + VPC), and the
+S3 buckets, and schedules the KMS key for deletion. That KMS step is irreversible
+once its window elapses and makes all SSE-KMS-encrypted backups unreadable.
 
 ## Hardening
 

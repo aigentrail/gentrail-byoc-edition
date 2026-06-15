@@ -33,7 +33,7 @@ cloudflared:
   enabled: false
 
 image:
-  registry: ghcr.io/aigentrail
+  registry: public.ecr.aws/p6a2v1k1
   tag: v0.1.0
 
 # Quoted so an empty CFN output renders as "" (a valid string for the chart
