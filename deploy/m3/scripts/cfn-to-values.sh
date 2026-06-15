@@ -54,9 +54,6 @@ rds:
   endpoint: $(val RdsEndpoint)
   secretArn: $(val RdsSecretArn)
 
-kms:
-  keyArn: $(val KmsKeyArn)
-
 llm:
   provider: bedrock
   model: $(val BedrockModelId)

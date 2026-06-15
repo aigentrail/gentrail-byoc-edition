@@ -20,7 +20,7 @@ image:
   # dev deploy overrides this to ghcr in infra/k3s-apps. images.yml mirrors every
   # release tag from ghcr to this registry.
   registry: public.ecr.aws/p6a2v1k1
-  tag: v0.2.0-rc.8
+  tag: v0.2.0-rc.9
   pullPolicy: IfNotPresent
   pullSecret: ""
 
@@ -75,9 +75,6 @@ cloudflared:
   replicaCount: 2
   image: cloudflare/cloudflared:2024.10.0
   tokenSecretRef: gentrail-cloudflared
-
-kms:
-  keyArn: ""
 
 llm:
   provider: bedrock
