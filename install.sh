@@ -44,12 +44,11 @@ BUCKET="${BUCKET:-gentrail-cfn-${ACCOUNT}-${REGION}}"
 IMAGE_TAG="${IMAGE_TAG:-$(awk '/^image:/{i=1} i&&/^  tag:/{print $2; exit}' "$CHART/values.yaml")}"
 log "account $ACCOUNT, region $REGION, image tag $IMAGE_TAG"
 
-log "stage template + archiver to s3://$BUCKET (>51 KB inline limit)"
+log "stage archiver lambda to s3://$BUCKET"
 aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
   --create-bucket-configuration LocationConstraint="$REGION" 2>/dev/null || true
 aws s3api put-public-access-block --bucket "$BUCKET" --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-aws s3 cp "$TEMPLATE" "s3://$BUCKET/cfn/m3-byoc-substrate.yaml" --region "$REGION" >/dev/null
 aws s3 cp "$ARCHIVER" "s3://$BUCKET/cfn/archiver.zip" --region "$REGION" >/dev/null
 
 params=(
@@ -60,8 +59,11 @@ params=(
 [ -n "${PUBLIC_OTEL_HOST:-}" ] && params+=( OtelHostname="$PUBLIC_OTEL_HOST" )
 
 log "deploy substrate $STACK (EKS + RDS, ~25 min)"
+# `deploy` only takes --template-file; --s3-bucket lets it upload the >51 KB
+# template itself (the inline limit) instead of us pre-staging it.
 aws cloudformation deploy --stack-name "$STACK" --region "$REGION" \
-  --template-url "https://s3.$REGION.amazonaws.com/$BUCKET/cfn/m3-byoc-substrate.yaml" \
+  --template-file "$TEMPLATE" \
+  --s3-bucket "$BUCKET" --s3-prefix cfn \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides "${params[@]}"
 

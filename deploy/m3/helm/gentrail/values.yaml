@@ -16,8 +16,11 @@ aws:
 createNamespace: true
 
 image:
-  registry: ghcr.io/aigentrail
-  tag: 0cb1a721f963526d9023e2dc0992ff5fe6c87960
+  # Public ECR mirror so BYOC clients pull anonymously (no token). The internal
+  # dev deploy overrides this to ghcr in infra/k3s-apps. images.yml mirrors every
+  # release tag from ghcr to this registry.
+  registry: public.ecr.aws/p6a2v1k1
+  tag: v0.2.0-rc.5
   pullPolicy: IfNotPresent
   pullSecret: ""
 
@@ -43,7 +46,8 @@ ddb:
   endpoint: "" # "" = real AWS DynamoDB via IRSA; set to dynamodb-local for local mode
 
 # Renders in-cluster DynamoDB-local + Postgres + table init so the chart runs
-# end to end without AWS. See values-local.yaml. Never enable for a cloud install.
+# end to end without AWS (set ddb.endpoint to dynamodb-local too). Never enable
+# for a cloud install.
 local:
   enabled: false
 
