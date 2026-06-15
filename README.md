@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > Work in progress. Scripts, image tags, and interfaces may change without
-> notice, and this is not yet production ready. Expect rough edges.
+> notice while we continuously harden the system. Expect rough edges.
 
 Run the full Gentrail stack in your own AWS account. Internal by default: private
 ALBs, no public domain, and no login, so the cluster network is your access
