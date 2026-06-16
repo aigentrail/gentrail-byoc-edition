@@ -10,7 +10,7 @@ boundary. One script, then paste your license in the dashboard.
 
 ## 1. Get a license
 
-Get a free evaluation license (10 agents, 60 days) at https://gentrail.ai/license.
+Get a free evaluation license (10 agents, 60 days) at https://gentrail.ai/#license.
 You paste it into the dashboard after install; there is nothing to set up first.
 
 ## 2. Prerequisites
