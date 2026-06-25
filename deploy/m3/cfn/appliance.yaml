@@ -1,0 +1,241 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Gentrail BYOC evaluation appliance: a single EC2 node running k3s that
+  self-installs the Gentrail chart (values-appliance.yaml) on first boot. The
+  whole stack runs in-cluster (Postgres + NATS + dynamodb-local), so no RDS, no
+  real DynamoDB, no S3, no IRSA. Access is SSM-only: the security group has zero
+  inbound rules and there is no SSH key. Single-AZ, node-local storage, no
+  managed backups: an evaluation box, NOT a system of record.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.large
+    Description: >-
+      The whole stack (Postgres, NATS, dynamodb-local, dashboard, evaluator,
+      authproxy) runs on this one node; t3.large (2 vCPU / 8 GiB) is the floor.
+    AllowedValues: [t3.large, t3.xlarge, m5.large, m5.xlarge]
+
+  RootVolumeSizeGiB:
+    Type: Number
+    Default: 50
+    MinValue: 30
+    Description: Encrypted gp3 root volume; holds images plus all PVC data (local-path).
+
+  LatestAl2023Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Resolved at deploy time from the public AL2023 SSM alias. Do not override.
+
+  PublicRepoUrl:
+    Type: String
+    Default: https://github.com/aigentrail/gentrail-byoc-edition.git
+    Description: The public BYOC repo the node clones to self-install the chart + init specs.
+
+  RepoBranch:
+    Type: String
+    Default: main
+    Description: Branch of the public repo to clone (pin a release branch, or a test branch).
+
+  LicenseJwt:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: >-
+      Optional license JWT to pre-seed. Leave empty to boot unlicensed and paste
+      the license in the dashboard (the chart seeds an empty license secret).
+
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+  SubnetCidr:
+    Type: String
+    Default: 10.42.0.0/24
+
+Conditions:
+  HasLicense: !Not [!Equals [!Ref LicenseJwt, ""]]
+
+Resources:
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-vpc" }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-igw" }]
+
+  VpcGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref SubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-public" }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-public-rt" }]
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VpcGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Egress-only: the box pulls k3s, the chart, and images outbound and is reached
+  # purely over SSM, so it needs no inbound rule (mirrors the dev k3s node SG).
+  NodeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Gentrail appliance node, egress-only, no inbound (SSM-only access).
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (image pulls, k3s install, SSM, AWS APIs).
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-node" }]
+
+  # SSM core is the only managed policy: it is what enables SSM-only access. No
+  # ECR pull (the public mirror is anonymous), no S3/DDB/Bedrock (no real AWS).
+  NodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-node" }]
+
+  NodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref NodeRole]
+
+  Node:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAl2023Ami
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref NodeInstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref NodeSecurityGroup]
+      MetadataOptions:
+        HttpTokens: required
+        HttpEndpoint: enabled
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref RootVolumeSizeGiB
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-appliance" }]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            exec > /var/log/gentrail-install.log 2>&1
+
+            dnf install -y git tar gzip aws-cfn-bootstrap || yum install -y git tar gzip aws-cfn-bootstrap
+            signal() { /opt/aws/bin/cfn-signal --exit-code "$1" --stack ${AWS::StackName} --resource Node --region ${AWS::Region} || true; }
+            # Any failure below signals the stack so it rolls back fast instead of waiting out the timeout.
+            trap 'signal 1' ERR
+
+            # k3s single-node server; traefik + servicelb disabled to mirror the dev
+            # recipe, local-path-provisioner stays for the PVCs. No IRSA apiserver args.
+            # systemd-resolved's stub resolv.conf (127.0.0.53) makes coredns loop-detect and
+            # crash-loop (breaking cluster DNS), so point k3s at the real uplink resolv.conf.
+            RESOLV=""
+            [ -f /run/systemd/resolve/resolv.conf ] && RESOLV="--resolv-conf /run/systemd/resolve/resolv.conf"
+            curl -sfL https://get.k3s.io | \
+              INSTALL_K3S_EXEC="server --disable traefik --disable servicelb --write-kubeconfig-mode 0644 $RESOLV" sh -
+            until k3s kubectl get --raw /readyz >/dev/null 2>&1; do sleep 2; done
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+            # k3s applies its bundled add-ons just after /readyz, and local-path-provisioner
+            # can crash-loop if it starts before the pod network settles, leaving every PVC
+            # unbound. Wait for it to exist, then for Available; restart if it is crash-looping,
+            # so the StatefulSet volumes bind under helm --wait.
+            until k3s kubectl -n kube-system get deploy local-path-provisioner >/dev/null 2>&1; do sleep 3; done
+            k3s kubectl -n kube-system rollout status deploy/local-path-provisioner --timeout=90s \
+              || k3s kubectl -n kube-system rollout restart deploy/local-path-provisioner
+            k3s kubectl -n kube-system rollout status deploy/local-path-provisioner --timeout=300s
+
+            curl -sfL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz | tar -xz -C /tmp
+            install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+
+            # The cloned public repo is the chart source (no OCI dependency): helm
+            # installs from its local path and the init specs come from the same clone.
+            GENTRAIL_DIR=/opt/gentrail
+            git clone --depth 1 --branch "${RepoBranch}" "${PublicRepoUrl}" "$GENTRAIL_DIR"
+            CHART="$GENTRAIL_DIR/deploy/m3/helm/gentrail"
+            INIT_DIR="$GENTRAIL_DIR/deploy/m3/init"
+
+            # Build the init-aws ConfigMap before helm so the Job's mount resolves.
+            # --from-file flattens every spec beside init-aws.sh at /init (TABLES_DIR=/init).
+            k3s kubectl create namespace gentrail --dry-run=client -o yaml | k3s kubectl apply -f -
+            CM_ARGS="--from-file=init-aws.sh=$INIT_DIR/init-aws.sh"
+            for f in "$INIT_DIR"/tables/*.json; do CM_ARGS="$CM_ARGS --from-file=$(basename "$f")=$f"; done
+            # shellcheck disable=SC2086
+            k3s kubectl -n gentrail create configmap init-aws $CM_ARGS \
+              --dry-run=client -o yaml | k3s kubectl apply -f -
+
+            LICENSE_SET=""
+            ${LicenseSetLine}
+            # shellcheck disable=SC2086
+            helm upgrade --install gentrail "$CHART" \
+              --namespace gentrail \
+              -f "$CHART/values-appliance.yaml" \
+              --set createNamespace=false \
+              $LICENSE_SET \
+              --wait --timeout 15m
+
+            trap - ERR
+            signal 0
+            echo "gentrail appliance install complete"
+          - LicenseSetLine: !If
+              - HasLicense
+              - !Sub 'LICENSE_SET="--set-string license.jwt=${LicenseJwt}"'
+              - "true"
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT20M
+        Count: 1
+
+Outputs:
+  InstanceId:
+    Description: Appliance node instance id (connect.sh / teardown.sh use it for SSM).
+    Value: !Ref Node
+  Tier:
+    Description: Marks this stack as the evaluation appliance tier.
+    Value: eval
+  ConnectHint:
+    Description: How to reach the dashboard.
+    Value: "Run ./connect.sh (TIER=eval): it SSM-tunnels the dashboard to http://localhost:8001"

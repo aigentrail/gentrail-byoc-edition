@@ -1,15 +1,18 @@
 # Defaults — all CFN-output-derived keys are left empty so a value injected
 # by cfn-to-values.sh wins via -f override.
 
+# Deployment substrate. The two targets differ only in how pods get AWS creds and
+# who provisions the RDS secret, so they collapse to one profile rather than a set
+# of independent flags:
+#   k3s (our cloud): no pod-identity webhook, so the chart injects the IRSA token
+#     directly; OpenTofu creates the RDS secret.
+#   eks (customer BYOC): the managed webhook injects the token; an in-cluster Job
+#     mints the RDS secret via IRSA.
+# Both use IRSA (web-identity tokens), never the node role via IMDS.
+mode: k3s
+
 aws:
   region: ""
-  # Allow pod egress to the IMDS endpoint for node-role credentials. Set false
-  # when pods get credentials via IRSA instead.
-  imdsEgress: true
-  # Inject the IRSA projected SA token + AWS web-identity env into pods directly.
-  # True on k3s (no pod-identity webhook). Set false on EKS, where the managed
-  # webhook injects them natively from the ServiceAccount role-arn annotation.
-  irsaInjectToken: true
 
 # Chart owns the namespace. Set false when the runner pre-creates it (so the
 # license Secret and init-aws ConfigMap can land before install).
@@ -25,16 +28,17 @@ image:
   pullSecret: ""
 
 ingress:
-  host: ""
-  certArn: ""
+  host: ""     # dashboard FQDN (only needed when its ALB is internet-facing)
   otelHost: "" # OTLP ingest FQDN for the authproxy (otel.aigentrail.com)
-  # Default true: both ALBs use the internal scheme (reachable only inside the
-  # VPC / over VPN), so no public domain is needed - the cluster network is the
-  # boundary and clients use the ALB DNS names (or DNS you point yourself). Set
-  # false for a public, internet-facing install (then provide host + certArn).
-  # TLS is driven by certArn independently of scheme: with a certArn the ALB
-  # serves HTTPS, without one HTTP (fine for a VPC-private endpoint).
-  internal: true
+  certArn: ""  # ACM cert for the public host(s); with it the ALB serves HTTPS, else HTTP
+  # ALB scheme per endpoint, controlled independently. internal = reachable only
+  # inside the VPC / over VPN (clients use the ALB DNS name); false =
+  # internet-facing. Both default internal - the safe default, and what our own
+  # cloud uses behind a tunnel. The free-tier install makes OTLP ingest public
+  # (agents send telemetry without a tunnel) by setting otelInternal=false, while
+  # the dashboard stays internal. TLS is driven by certArn independently of scheme.
+  dashboardInternal: true
+  otelInternal: true
 
 # PVC storage class. "" uses the cluster default (k3s local-path); set gp2 on EKS.
 storage:
@@ -42,7 +46,7 @@ storage:
 
 ddb:
   tablePrefix: gentrail
-  tableSuffix: "" # appended after the table name, e.g. "-dev" for aigentrail-traces-dev
+  tableSuffix: "" # appended after the table name, e.g. "-dev" for gentrail-traces-dev
   endpoint: "" # "" = real AWS DynamoDB via IRSA; set to dynamodb-local for local mode
 
 # Renders in-cluster DynamoDB-local + Postgres + table init so the chart runs
@@ -50,6 +54,11 @@ ddb:
 # for a cloud install.
 local:
   enabled: false
+  # PVC sizes for the on-disk appliance datastores (StatefulSets). Only used when
+  # local.enabled; on a cloud install the real DDB/RDS make these inert.
+  dynamodbSize: 10Gi
+  postgresSize: 10Gi
+  tablesDir: "" # where init-aws.sh finds table specs; "" = /init (the flat ConfigMap mount)
 
 # Default-deny + per-component allows. Disable for local clusters whose CNI
 # enforces policies but where the prod 443/IRSA egress shape does not apply.
@@ -62,10 +71,8 @@ s3:
 rds:
   endpoint: ""
   secretArn: ""
-  # true: a pre-install Job mints gentrail-rds-secret from Secrets Manager via
-  # IRSA (EKS). false: the secret is supplied externally (local mode, or k3s
-  # where OpenTofu creates it) since k3s has no IRSA.
-  bootstrap: true
+  # The pre-install Job that mints gentrail-rds-secret runs only on eks (see
+  # mode); on k3s OpenTofu creates the secret, and local mode supplies it.
 
 # In-cluster Cloudflare Tunnel ingress (k3s): cloudflared connects out to
 # Cloudflare and routes the configured hostnames to the in-cluster Services.
@@ -86,9 +93,14 @@ irsa:
   rdsBootstrap: ""
   evaluator: ""
   authproxy: ""
+  docsServer: ""
 
 license:
   secretRef: gentrail-license
+  # Optional bootstrap JWT. When set, the pre-install hook seeds the license
+  # secret once at install (hosted passes its Secrets Manager value here); when
+  # empty the secret is created empty for the in-product upload to populate.
+  jwt: ""
 
 audit:
   pvcSize: 10Gi
@@ -98,13 +110,29 @@ dashboard:
   # Set false to run a read-only dashboard (no heartbeat/evidence writes) when
   # a second stack shares this RDS during an incremental cutover.
   auditLoop: true
+  # true on a self-hosted (own-cloud) install: the scanner role lives in this
+  # account, so AWS connect can suggest its ARN. false for the hosted SaaS.
+  selfHosted: false
+  # AWS-connect onboarding (the "connect your AWS account" flow). The hosted
+  # stage sets these from its own domains + backend account; left empty the flow
+  # has no callback URL, skips the forwarder deploy, and omits the cross-account
+  # trust account from the CloudFormation template.
+  awsAccountId: ""
+  callbackUrl: ""
+  ingestionEndpoint: ""
+  # Absolute base for links in notification emails; empty falls back to relative.
+  baseUrl: ""
   # Match the live env to share the session cookie (SSO across hosts, and
   # existing sessions survive a hostname cutover). Unset falls back to a
   # host-only cookie signed with the built-in "dev" secret.
   cookieDomain: ""
   sessionSecretName: ""   # k8s secret holding key "session-secret"
-  # Dev-only /admin/orgs lifecycle; the BYOC binary excludes the routes at compile time.
+  # /admin/orgs tenant lifecycle; the routes register only when this token is set.
   adminTokenSecretName: ""   # k8s secret holding key "admin-token"
+  # Relax X-Frame-Options from DENY to SAMEORIGIN so the marketing demo can embed
+  # the dashboard in an iframe it proxies under the same origin. Demo stage only;
+  # production leaves it false (unframeable).
+  allowFraming: false
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
@@ -141,3 +169,40 @@ authproxy:
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 350Mi }
+
+# The interactive-demo sidecar (gentrail.ai/demo): leases per-visitor pool orgs
+# and replays a case's recorded trace cassette through ingestion. Demo stage only
+# (enabled false everywhere else). Cassettes are baked into the image at /cases.
+# Needs the same admin token the dashboard guards /admin/orgs with, so the pool
+# can mint + reset orgs; pair with dashboard.allowFraming: true.
+sidecar:
+  enabled: false
+  replicaCount: 1
+  buffer: 3
+  adminTokenSecretName: ""   # k8s secret holding key "admin-token" (reuse the dashboard's)
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 256Mi }
+
+# docs-server (the internal wiki). Our-cloud-only: enabled false so a BYOC install
+# never renders it (like cloudflared/local). infra/k3s-apps enables it, supplies
+# the binaries bucket, and routes the wiki hostname to it on the k3s tunnel. It
+# shares the dashboard's session cookie (dashboard.sessionSecretName +
+# dashboard.cookieDomain) so a dashboard login authenticates the wiki.
+docsServer:
+  enabled: false
+  # Binaries bucket holding the docs tarball + the live-edit write-through prefix.
+  # At boot the server extracts docsTarballKey, then reads/writes edits under
+  # editsS3Prefix. IRSA (irsa.docsServer) scopes the access.
+  editsS3Bucket: ""
+  editsS3Prefix: "intranet-docs/data/"
+  docsTarballKey: "intranet-docs/docs.tar.gz"
+  # Session cookie Domain for the wiki. Empty inherits dashboard.cookieDomain
+  # (same parent domain). Set explicitly when the wiki lives on a different
+  # parent (e.g. ".gentrail.ai" while the dashboard is on aigentrail.com).
+  cookieDomain: ""
+  # In-cluster dashboard URL the wiki's login form bridges to (shared auth API).
+  dashboardInternalUrl: "http://dashboard:8001"
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 150Mi }

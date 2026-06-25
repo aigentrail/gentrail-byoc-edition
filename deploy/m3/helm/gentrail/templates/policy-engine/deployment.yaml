@@ -37,7 +37,7 @@ spec:
             - name: LLM_MODEL
               value: {{ .Values.llm.model | quote }}
 {{- include "gentrail.licenseEnv" . | nindent 12 }}
-            {{- if and .Values.irsa.policyEngine .Values.aws.irsaInjectToken }}
+            {{- if and .Values.irsa.policyEngine (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaEnv" .Values.irsa.policyEngine | nindent 12 }}
             {{- end }}
           resources: {{- toYaml .Values.policyEngine.resources | nindent 12 }}
@@ -51,11 +51,11 @@ spec:
             periodSeconds: 30
           volumeMounts:
 {{- include "gentrail.licenseMount" . | nindent 12 }}
-            {{- if and .Values.irsa.policyEngine .Values.aws.irsaInjectToken }}
+            {{- if and .Values.irsa.policyEngine (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenMount" . | nindent 12 }}
             {{- end }}
       volumes:
 {{- include "gentrail.licenseVolume" . | nindent 8 }}
-        {{- if and .Values.irsa.policyEngine .Values.aws.irsaInjectToken }}
+        {{- if and .Values.irsa.policyEngine (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
         {{- end }}

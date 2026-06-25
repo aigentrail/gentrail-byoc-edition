@@ -5,7 +5,7 @@ metadata:
   namespace: {{ .Release.Namespace }}
   annotations:
     kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: {{ if .Values.ingress.internal }}internal{{ else }}internet-facing{{ end }}
+    alb.ingress.kubernetes.io/scheme: {{ if .Values.ingress.dashboardInternal }}internal{{ else }}internet-facing{{ end }}
     alb.ingress.kubernetes.io/target-type: ip
     {{- if .Values.ingress.certArn }}
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'

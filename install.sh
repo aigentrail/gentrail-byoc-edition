@@ -13,7 +13,7 @@
 #   IMAGE_TAG    container image tag                 (default: the chart's pin)
 #   GHCR_USER + GHCR_TOKEN  a read:packages token, only if the images are private
 #   PUBLIC_HOST  set to a public FQDN to do an internet-facing install instead
-#                (also set PUBLIC_OTEL_HOST and a cert via HostedZoneId/ACM)
+#                (also set PUBLIC_OTEL_HOST; ACM_CERT_ARN for an HTTPS listener)
 set -euo pipefail
 
 REGION="${REGION:-us-west-2}"
@@ -36,6 +36,29 @@ ARCHIVER="$M3/archiver.zip"
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/gentrail-$STACK}"
 log() { printf '\n==> %s\n' "$*"; }
 
+# Tier: Evaluation (single-node appliance) vs Production (this EKS path). Resolve
+# from --tier=, then $TIER, then an interactive menu; non-interactive with neither
+# set falls through to Production, so existing scripted callers are unchanged.
+TIER="${TIER:-}"
+for arg in "$@"; do case "$arg" in --tier=*) TIER="${arg#--tier=}";; esac; done
+if [ -z "$TIER" ] && [ -t 0 ]; then
+  cat <<'MENU'
+
+Gentrail installs into your own AWS account; your data never leaves it. Pick a tier:
+
+  [1] Evaluation   single EC2 + k3s, all in-cluster    ~5 min   ~$70/mo while running
+                   single-AZ, node-local storage, NO managed backups: a trial box,
+                   NOT a system of record.
+  [2] Production   EKS + Multi-AZ RDS + KMS CMK + S3    ~30 min  ~$400/mo
+                   Object-Lock evidence, managed backups, HA: the system of record.
+
+MENU
+  printf 'Tier [1/2]: '
+  read -r choice
+  case "$choice" in 1 | eval | e | E) TIER="eval" ;; *) TIER="prod" ;; esac
+fi
+[ "$TIER" = eval ] && exec "$M3/install-appliance.sh" "$@"
+
 for t in aws kubectl helm jq; do command -v "$t" >/dev/null || { echo "missing required tool: $t" >&2; exit 1; }; done
 [ -f "$ARCHIVER" ] || { echo "missing $ARCHIVER (the trace-archiver zip ships with this repo)" >&2; exit 1; }
 
@@ -57,6 +80,7 @@ params=(
 )
 [ -n "${PUBLIC_HOST:-}" ] && params+=( Hostname="$PUBLIC_HOST" )
 [ -n "${PUBLIC_OTEL_HOST:-}" ] && params+=( OtelHostname="$PUBLIC_OTEL_HOST" )
+[ -n "${ACM_CERT_ARN:-}" ] && params+=( ExistingAcmCertArn="$ACM_CERT_ARN" )
 
 log "deploy substrate $STACK (EKS + RDS, ~25 min)"
 # `deploy` only takes --template-file; --s3-bucket lets it upload the >51 KB
@@ -72,7 +96,7 @@ CLUSTER_NAME=$(aws cloudformation describe-stacks --stack-name "$STACK" --region
 aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "$REGION" --kubeconfig "$KUBECONFIG" >/dev/null
 
 log "AWS Load Balancer Controller + default StorageClass"
-"$HERE/scripts/install-alb-controller.sh" "$STACK"
+"$M3/scripts/install-alb-controller.sh" "$STACK"
 kubectl annotate sc gp2 storageclass.kubernetes.io/is-default-class- 2>/dev/null || true
 kubectl apply -f - <<'SC'
 apiVersion: storage.k8s.io/v1
@@ -84,7 +108,7 @@ parameters: { type: gp3 }
 SC
 
 log "generate values"
-values="$(mktemp)"; "$HERE/scripts/cfn-to-values.sh" "$STACK" > "$values"
+values="$(mktemp)"; "$M3/scripts/cfn-to-values.sh" "$STACK" > "$values"
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
 helm_extra=(--set storage.class=gp3-csi)
@@ -94,7 +118,10 @@ if [ -n "${GHCR_TOKEN:-}" ]; then
     --dry-run=client -o yaml | kubectl apply -f -
   helm_extra+=(--set image.pullSecret=ghcr)
 fi
-[ -n "${PUBLIC_HOST:-}" ] && helm_extra+=(--set ingress.internal=false)
+# Each endpoint's ALB scheme is independent: expose OTLP ingest publicly (so
+# agents send telemetry without a tunnel) without exposing the dashboard.
+[ -n "${PUBLIC_OTEL_HOST:-}" ] && helm_extra+=(--set ingress.otelInternal=false)
+[ -n "${PUBLIC_HOST:-}" ] && helm_extra+=(--set ingress.dashboardInternal=false)
 
 log "install the chart (tag $IMAGE_TAG)"
 helm upgrade --install gentrail "$CHART" -n "$NAMESPACE" -f "$values" \

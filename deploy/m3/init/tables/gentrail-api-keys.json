@@ -1,0 +1,16 @@
+{
+  "AttributeDefinitions": [
+    {
+      "AttributeName": "token",
+      "AttributeType": "S"
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST",
+  "KeySchema": [
+    {
+      "AttributeName": "token",
+      "KeyType": "HASH"
+    }
+  ],
+  "TableName": "gentrail-api-keys"
+}

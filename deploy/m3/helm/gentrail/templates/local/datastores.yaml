@@ -3,27 +3,45 @@
 # DynamoDB-local + Postgres + the table-init Job. Gated on local.enabled; never
 # rendered for a cloud install. The init-aws ConfigMap is created by the runner
 # from the canonical deploy/m3/init/init-aws.sh, so table definitions never fork.
+# StatefulSet + PVC (not -inMemory) so an appliance reboot keeps the data.
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: dynamodb-local
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "gentrail.labels" (merge (dict "component" "dynamodb-local") .) | indent 4 }}
 spec:
+  serviceName: dynamodb-local
   replicas: 1
   selector:
-    matchLabels: { app.kubernetes.io/component: dynamodb-local }
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "dynamodb-local") .) | indent 6 }}
   template:
     metadata:
-      labels: { app.kubernetes.io/component: dynamodb-local }
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "dynamodb-local") .) | indent 8 }}
     spec:
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
       containers:
         - name: dynamodb-local
           image: docker.io/amazon/dynamodb-local:2.5.2
-          args: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+          args: ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/home/dynamodblocal/data"]
           ports:
             - { containerPort: 8000 }
+          volumeMounts:
+            - { name: data, mountPath: /home/dynamodblocal/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        {{- if .Values.storage.class }}
+        storageClassName: {{ .Values.storage.class | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.local.dynamodbSize | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -31,25 +49,30 @@ metadata:
   name: dynamodb-local
   namespace: {{ .Release.Namespace }}
 spec:
-  selector: { app.kubernetes.io/component: dynamodb-local }
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "dynamodb-local") .) | indent 4 }}
   ports:
     - { port: 8000, targetPort: 8000 }
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
   name: postgres
   namespace: {{ .Release.Namespace }}
   labels:
 {{ include "gentrail.labels" (merge (dict "component" "postgres") .) | indent 4 }}
 spec:
+  serviceName: postgres
   replicas: 1
   selector:
-    matchLabels: { app.kubernetes.io/component: postgres }
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "postgres") .) | indent 6 }}
   template:
     metadata:
-      labels: { app.kubernetes.io/component: postgres }
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "postgres") .) | indent 8 }}
     spec:
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
       containers:
         - name: postgres
           image: docker.io/library/postgres:16-alpine
@@ -57,8 +80,27 @@ spec:
             - { name: POSTGRES_DB, value: gentrail }
             - { name: POSTGRES_USER, value: gentrail }
             - { name: POSTGRES_PASSWORD, value: gentrail }
+            # subdir of the mount: initdb rejects a non-empty dir (lost+found).
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
           ports:
             - { containerPort: 5432 }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "gentrail", "-d", "gentrail"] }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ ReadWriteOnce ]
+        {{- if .Values.storage.class }}
+        storageClassName: {{ .Values.storage.class | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.local.postgresSize | quote }}
 ---
 apiVersion: v1
 kind: Service
@@ -66,7 +108,8 @@ metadata:
   name: postgres
   namespace: {{ .Release.Namespace }}
 spec:
-  selector: { app.kubernetes.io/component: postgres }
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "postgres") .) | indent 4 }}
   ports:
     - { port: 5432, targetPort: 5432 }
 ---
@@ -89,6 +132,7 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
       containers:
         - name: init-aws
           image: docker.io/amazon/aws-cli:2.17.0
@@ -98,6 +142,8 @@ spec:
             - { name: AWS_SECRET_ACCESS_KEY, value: local }
             - { name: AWS_REGION, value: {{ .Values.aws.region | quote }} }
             - { name: DDB_ENDPOINT, value: {{ .Values.ddb.endpoint | quote }} }
+            # kubectl create configmap flattens files to the mount root, so specs land at /init not /init/tables.
+            - { name: TABLES_DIR, value: {{ .Values.local.tablesDir | default "/init" | quote }} }
           volumeMounts:
             - { name: init, mountPath: /init, readOnly: true }
       volumes:

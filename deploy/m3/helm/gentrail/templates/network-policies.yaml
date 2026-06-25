@@ -99,28 +99,6 @@ spec:
         - { protocol: TCP, port: 4222 }
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
-{{- if .Values.aws.imdsEgress }}
----
-# Pods assume the node IAM role via IMDS (when not using IRSA). The link-local
-# metadata endpoint is port 80, which the :443 AWS-API allow above does not
-# cover, so the AWS-calling components need an explicit allow or they can't
-# fetch credentials at all.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: imds-egress
-  namespace: {{ .Release.Namespace }}
-spec:
-  podSelector:
-    matchExpressions:
-      - { key: app.kubernetes.io/component, operator: In, values: [ dashboard, authproxy, evaluator, policy-engine ] }
-  policyTypes: [ Egress ]
-  egress:
-    - to:
-        - ipBlock: { cidr: 169.254.169.254/32 }
-      ports:
-        - { protocol: TCP, port: 80 }
-{{- end }}
 ---
 # NATS accepts client connections (4222) and peer clustering (6222).
 apiVersion: networking.k8s.io/v1
@@ -164,6 +142,79 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+{{- if .Values.docsServer.enabled }}
+---
+# docs-server reaches S3/STS (443), the dashboard auth bridge (8001), and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: docs-server-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: docs-server
+  policyTypes: [ Egress ]
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 8001 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Allow cloudflared (tunnel) + the kubelet probe to reach docs-server on 8002.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: docs-server-ingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: docs-server
+  policyTypes: [ Ingress ]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8002 }
+{{- end }}
+{{- if .Values.sidecar.enabled }}
+---
+# The demo sidecar reaches the dashboard (8001, login + admin org lifecycle) and
+# the authproxy (4318, OTLP cassette replay), plus DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sidecar-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: sidecar
+  policyTypes: [ Egress ]
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 8001 }
+        - { protocol: TCP, port: 4318 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Allow cloudflared (tunnel) + the kubelet probe to reach the sidecar on 8090.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sidecar-ingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: sidecar
+  policyTypes: [ Ingress ]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8090 }
+{{- end }}
 {{- if .Values.cloudflared.enabled }}
 ---
 # cloudflared reaches Cloudflare's edge (443) and the in-cluster Services.
@@ -187,6 +238,12 @@ spec:
         - { protocol: TCP, port: 8001 }
         - { protocol: TCP, port: 4318 }
         - { protocol: TCP, port: 8100 }
+        {{- if .Values.docsServer.enabled }}
+        - { protocol: TCP, port: 8002 }
+        {{- end }}
+        {{- if .Values.sidecar.enabled }}
+        - { protocol: TCP, port: 8090 }
+        {{- end }}
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Tear down a Gentrail BYOC install: removes the chart, the substrate stack
-# (EKS + RDS + VPC), the retained S3 buckets, and schedules the KMS key for
-# deletion. Destructive; the KMS step is irreversible once its window elapses.
+# Tear down a Gentrail BYOC install. Auto-detects the tier: Evaluation (the
+# appliance) is a single CloudFormation stack delete; Production removes the chart,
+# the substrate stack (EKS + RDS + VPC), the retained S3 buckets, and schedules
+# the KMS key for deletion. Destructive; the prod KMS step is irreversible.
 #
-# Needs: aws (authenticated to the install's account), kubectl, helm.
+# Needs: aws (+ kubectl, helm for the Production tier).
 # Run:   ./teardown.sh                 # tears down STACK=gentrail
 #
 # Config (env vars, all optional):
 #   REGION      AWS region                  (default us-west-2)
 #   STACK       CloudFormation stack name   (default gentrail)
 #   NAMESPACE   k8s namespace               (default gentrail)
+#   TIER        eval|prod                   (default: auto-detect from the stack)
 #   YES=1       skip the confirmation prompt
 set -euo pipefail
 
@@ -18,7 +20,33 @@ export AWS_DEFAULT_REGION="$REGION" AWS_REGION="$REGION"
 STACK="${STACK:-gentrail}"
 NAMESPACE="${NAMESPACE:-gentrail}"
 
-for t in aws kubectl helm; do command -v "$t" >/dev/null || { echo "missing required tool: $t" >&2; exit 1; }; done
+command -v aws >/dev/null || { echo "missing required tool: aws" >&2; exit 1; }
+
+ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+
+# The appliance stack tags itself Tier=eval; the EKS stack has no such output.
+TIER="${TIER:-}"
+if [ -z "$TIER" ]; then
+  TIER="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
+    --query 'Stacks[0].Outputs[?OutputKey==`Tier`].OutputValue' --output text 2>/dev/null || true)"
+  [ "$TIER" = eval ] || TIER=prod
+fi
+
+if [ "$TIER" = eval ]; then
+  echo "About to tear down the Gentrail evaluation appliance in account $ACCOUNT:"
+  echo "  stack: $STACK (one EC2 + its VPC; all data on the node is destroyed)"
+  if [ "${YES:-}" != "1" ]; then
+    read -r -p "Type the stack name (${STACK}) to confirm: " ans
+    [ "$ans" = "$STACK" ] || { echo "aborted."; exit 1; }
+  fi
+  echo "==> delete appliance stack $STACK (~3-5 min)"
+  aws cloudformation delete-stack --stack-name "$STACK" --region "$REGION"
+  aws cloudformation wait stack-delete-complete --stack-name "$STACK" --region "$REGION"
+  echo "==> teardown complete"
+  exit 0
+fi
+
+for t in kubectl helm; do command -v "$t" >/dev/null || { echo "missing required tool: $t" >&2; exit 1; }; done
 
 out() {
     aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \
@@ -34,7 +62,7 @@ RDS="$(aws cloudformation describe-stack-resources --stack-name "$STACK" --regio
 VPC="$(aws eks describe-cluster --name "$CLUSTER" --region "$REGION" \
     --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || true)"
 
-echo "About to tear down the Gentrail install in account $(aws sts get-caller-identity --query Account --output text):"
+echo "About to tear down the Gentrail install in account $ACCOUNT:"
 echo "  stack:   $STACK"
 echo "  cluster: $CLUSTER"
 echo "  rds:     ${RDS:-<none>}"

@@ -1,0 +1,40 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "GentrailStackServices",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:*",
+        "ec2:*",
+        "eks:*",
+        "rds:*",
+        "dynamodb:*",
+        "lambda:*",
+        "logs:*",
+        "kms:*",
+        "s3:*",
+        "secretsmanager:*",
+        "autoscaling:*",
+        "elasticloadbalancing:*",
+        "acm:Describe*",
+        "acm:List*",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:StartSession",
+        "ssm:TerminateSession",
+        "ssm:SendCommand",
+        "ssm:GetCommandInvocation",
+        "ssm:DescribeInstanceInformation",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "GentrailNamedIamRoles",
+      "Effect": "Allow",
+      "Action": "iam:*",
+      "Resource": "*"
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "AttributeDefinitions": [
+    {
+      "AttributeName": "PK",
+      "AttributeType": "S"
+    },
+    {
+      "AttributeName": "SK",
+      "AttributeType": "S"
+    },
+    {
+      "AttributeName": "GSI1PK",
+      "AttributeType": "S"
+    },
+    {
+      "AttributeName": "GSI2PK",
+      "AttributeType": "S"
+    },
+    {
+      "AttributeName": "GSI3PK",
+      "AttributeType": "S"
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST",
+  "GlobalSecondaryIndexes": [
+    {
+      "IndexName": "agent-index",
+      "KeySchema": [
+        {
+          "AttributeName": "GSI1PK",
+          "KeyType": "HASH"
+        },
+        {
+          "AttributeName": "SK",
+          "KeyType": "RANGE"
+        }
+      ],
+      "Projection": {
+        "ProjectionType": "ALL"
+      }
+    },
+    {
+      "IndexName": "eval-index",
+      "KeySchema": [
+        {
+          "AttributeName": "GSI2PK",
+          "KeyType": "HASH"
+        },
+        {
+          "AttributeName": "SK",
+          "KeyType": "RANGE"
+        }
+      ],
+      "Projection": {
+        "ProjectionType": "ALL"
+      }
+    },
+    {
+      "IndexName": "span-index",
+      "KeySchema": [
+        {
+          "AttributeName": "GSI3PK",
+          "KeyType": "HASH"
+        },
+        {
+          "AttributeName": "SK",
+          "KeyType": "RANGE"
+        }
+      ],
+      "Projection": {
+        "ProjectionType": "KEYS_ONLY"
+      }
+    }
+  ],
+  "KeySchema": [
+    {
+      "AttributeName": "PK",
+      "KeyType": "HASH"
+    },
+    {
+      "AttributeName": "SK",
+      "KeyType": "RANGE"
+    }
+  ],
+  "TableName": "gentrail-traces"
+}

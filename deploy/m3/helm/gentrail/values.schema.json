@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["aws", "image", "ingress", "ddb", "s3", "rds", "llm", "irsa", "license"],
+  "required": ["mode", "aws", "image", "ingress", "ddb", "s3", "rds", "llm", "irsa", "license"],
   "properties": {
+    "mode":    { "type": "string", "enum": ["k3s", "eks"] },
     "aws":     { "type": "object", "required": ["region"], "properties": { "region": { "type": "string" } } },
     "image":   { "type": "object", "required": ["registry", "tag"], "properties": { "registry": { "type": "string" }, "tag": { "type": "string" }, "pullPolicy": { "type": "string" }, "pullSecret": { "type": "string" } } },
-    "ingress": { "type": "object", "required": ["host"], "properties": { "host": { "type": "string" }, "certArn": { "type": "string" } } },
+    "ingress": { "type": "object", "required": ["host"], "properties": { "host": { "type": "string" }, "otelHost": { "type": "string" }, "certArn": { "type": "string" }, "dashboardInternal": { "type": "boolean" }, "otelInternal": { "type": "boolean" } } },
     "ddb":     { "type": "object", "required": ["tablePrefix"], "properties": { "tablePrefix": { "type": "string" } } },
     "s3":      { "type": "object", "required": ["evidenceBucket"], "properties": { "evidenceBucket": { "type": "string" } } },
     "rds":     { "type": "object", "required": ["endpoint", "secretArn"], "properties": { "endpoint": { "type": "string" }, "secretArn": { "type": "string" } } },

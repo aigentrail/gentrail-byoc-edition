@@ -1,0 +1,104 @@
+# Single-node BYOC appliance: the whole stack runs in-cluster with NO real AWS.
+# In-cluster Postgres + NATS + dynamodb-local replace RDS / real DynamoDB; there
+# is no S3, no IRSA, no ALB. Apply with:
+#   helm install gentrail . -f values-appliance.yaml \
+#     --set image.tag=<release> --set license.jwt=<jwt-or-leave-empty>
+# Everything stateful persists to PVCs (local-path on k3s) so a reboot keeps data.
+
+# eks selects the managed pod-identity webhook path; the appliance has no webhook
+# and no IRSA, so neither mode's cred wiring fires. local.enabled short-circuits the
+# rds-secret Job regardless of mode, and the dummy-cred localEnv satisfies the DDB
+# SDK. mode is set to eks only so the k3s IRSA token-projection block stays off.
+mode: eks
+
+aws:
+  # dynamodb-local ignores the region but the SDK still requires one to be set.
+  region: us-west-2
+
+createNamespace: true
+
+# Renders in-cluster dynamodb-local + Postgres + the init-aws table Job, all on
+# PVCs. ddb.endpoint below points the services + init Job at dynamodb-local.
+local:
+  enabled: true
+  dynamodbSize: 10Gi
+  postgresSize: 10Gi
+
+ddb:
+  tablePrefix: gentrail
+  tableSuffix: ""
+  endpoint: "http://dynamodb-local:8000"
+
+# "" = the cluster default StorageClass (k3s local-path). Node-local on a
+# single-node appliance, which is exactly the durability domain we want.
+storage:
+  class: ""
+
+# The default-deny + AWS-egress policies assume the data plane is real AWS reached
+# over 443; they have no allow rule for the in-cluster dynamodb-local/postgres pods
+# and would block them. A single-node appliance is single-tenant, so disable.
+networkPolicies:
+  enabled: false
+
+# No S3 on the appliance. EVIDENCE_BUCKET is OPTIONAL in the dashboard: empty means
+# audit evidence is not shipped to object storage (logged-and-dropped). The dashboard
+# has no S3 endpoint-override in Go, so there is no in-cluster MinIO substitute today.
+s3:
+  evidenceBucket: ""
+
+# EKS-only RDS bootstrap; unused because local.enabled supplies gentrail-rds-secret.
+rds:
+  endpoint: ""
+  secretArn: ""
+
+# No IRSA on the appliance. Empty ARNs keep the irsaEnv/token-projection blocks off
+# (they also only render under mode==k3s, which we are not).
+irsa:
+  dashboard: ""
+  policyEngine: ""
+  rdsBootstrap: ""
+  evaluator: ""
+  authproxy: ""
+  docsServer: ""
+
+# Single node: one of everything, single NATS node (its JetStream PVC is the sole
+# copy, which is correct for single-node). policy-engine stays off (it needs Bedrock).
+nats:
+  replicas: 1
+  jetstreamSize: 5Gi
+
+dashboard:
+  replicaCount: 1
+  auditLoop: true
+  selfHosted: false
+
+evaluator:
+  replicaCount: 1
+
+authproxy:
+  replicaCount: 1
+
+policyEngine:
+  replicaCount: 0
+
+# Own-cloud-only extras: never on a BYOC appliance.
+cloudflared:
+  enabled: false
+docsServer:
+  enabled: false
+
+# No ALB on the appliance. Leaving ingress hosts empty still renders the ALB Ingress
+# object, but on k3s with the AWS LB controller absent it is inert (no ALB created);
+# reach the dashboard via `kubectl port-forward svc/dashboard 8001:8001` or expose
+# the dashboard Service as a NodePort out-of-band. See wiring_changes for the
+# optional dashboard.serviceType=NodePort knob if you want a stable node port.
+ingress:
+  host: ""
+  otelHost: ""
+  certArn: ""
+
+# License is uploaded in-product: the pre-install hook seeds gentrail-license empty
+# and the services boot license-less and prompt for it. Set jwt here to pre-seed.
+license:
+  secretRef: gentrail-license
+  jwt: ""

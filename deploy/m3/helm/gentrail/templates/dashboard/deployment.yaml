@@ -54,6 +54,24 @@ spec:
               value: "http://policy-engine:8100"
             - name: AUDIT_LOOP_ENABLED
               value: {{ .Values.dashboard.auditLoop | quote }}
+            - name: AIGENTRAIL_SELF_HOSTED
+              value: {{ .Values.dashboard.selfHosted | quote }}
+            {{- if .Values.dashboard.awsAccountId }}
+            - name: AIGENTRAIL_AWS_ACCOUNT_ID
+              value: {{ .Values.dashboard.awsAccountId | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.callbackUrl }}
+            - name: AIGENTRAIL_CALLBACK_URL
+              value: {{ .Values.dashboard.callbackUrl | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.ingestionEndpoint }}
+            - name: AIGENTRAIL_INGESTION_ENDPOINT
+              value: {{ .Values.dashboard.ingestionEndpoint | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.baseUrl }}
+            - name: AIGENTRAIL_DASHBOARD_BASE_URL
+              value: {{ .Values.dashboard.baseUrl | quote }}
+            {{- end }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -80,8 +98,12 @@ spec:
                   name: {{ .Values.dashboard.adminTokenSecretName }}
                   key: admin-token
             {{- end }}
+            {{- if .Values.dashboard.allowFraming }}
+            - name: DASHBOARD_ALLOW_FRAMING
+              value: "true"
+            {{- end }}
 {{- include "gentrail.localEnv" . | nindent 12 }}
-            {{- if and .Values.irsa.dashboard .Values.aws.irsaInjectToken }}
+            {{- if and .Values.irsa.dashboard (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaEnv" .Values.irsa.dashboard | nindent 12 }}
             {{- end }}
           resources: {{- toYaml .Values.dashboard.resources | nindent 12 }}
@@ -97,7 +119,7 @@ spec:
             - name: audit-buffer
               mountPath: /var/lib/gentrail/audit
 {{- include "gentrail.licenseMount" . | nindent 12 }}
-            {{- if and .Values.irsa.dashboard .Values.aws.irsaInjectToken }}
+            {{- if and .Values.irsa.dashboard (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenMount" . | nindent 12 }}
             {{- end }}
       volumes:
@@ -105,7 +127,7 @@ spec:
         - name: audit-buffer
           persistentVolumeClaim:
             claimName: dashboard-audit-buffer
-        {{- if and .Values.irsa.dashboard .Values.aws.irsaInjectToken }}
+        {{- if and .Values.irsa.dashboard (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
         {{- end }}
 ---

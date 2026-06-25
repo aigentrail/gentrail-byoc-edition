@@ -46,8 +46,8 @@ Metadata:
           - RdsEnabledCloudwatchLogsExports
       - Label: { default: "Ingress / TLS (P3)" }
         Parameters:
-          - HostedZoneId
           - Hostname
+          - OtelHostname
           - ExistingAcmCertArn
           - EnableAlbAccessLogs
           - TlsPolicy
@@ -152,9 +152,8 @@ Parameters:
     MinLength: 1
     Description: >
       S3 bucket in this stack's region holding the trace-archiver Lambda zip.
-      Stage services/ingestion/lambda-archiver/archiver.zip there before
-      create-stack (cfn-deploy.sh does this automatically). The archiver
-      copies TTL-expired traces to the trace-archive bucket (GLACIER
+      install.sh stages the bundled archiver.zip there before create-stack. The
+      archiver copies TTL-expired traces to the trace-archive bucket (GLACIER
       tiering), matching Gentrail cloud's retention behavior.
   ArchiverCodeS3Key:
     Type: String
@@ -196,10 +195,6 @@ Parameters:
       deleting the RDS instance during rollback, wedging the stack.
 
   # ── Ingress / TLS (P3) ─────────────────────────────────────────────────
-  HostedZoneId:
-    Type: String
-    Default: ""
-    Description: Optional Route 53 hosted zone ID. Empty = customer makes DNS records manually.
   Hostname:
     Type: String
     Default: ""
@@ -211,7 +206,7 @@ Parameters:
   ExistingAcmCertArn:
     Type: String
     Default: ""
-    Description: Optional. If empty AND HostedZoneId is set, CFN creates a new ACM cert via DNS-01.
+    Description: Optional ACM cert ARN for HTTPS on the public ALB(s). Empty = HTTP (fine for a VPC-internal endpoint).
   EnableAlbAccessLogs:
     Type: String
     AllowedValues: [ "true", "false" ]
@@ -248,8 +243,13 @@ Parameters:
   # ── Cross-account (P4) ─────────────────────────────────────────────────
   VendorAccountId:
     Type: String
-    Default: "617072386017"
-    AllowedPattern: "^[0-9]{12}$"
+    Default: ""
+    AllowedPattern: "^$|^[0-9]{12}$"
+    Description: >-
+      Vendor AWS account for the optional cross-account security scan (a paid
+      feature). Leave empty on the free tier; supply it together with ExternalId
+      to enable the scanner. No default, so a stock deploy never trusts a third
+      party.
   ExternalId:
     Type: String
     NoEcho: true
@@ -270,14 +270,13 @@ Mappings:
     "5": { Suffix: "f" }
 
 Conditions:
-  # The cross-account security scanner is a paid feature; it is created only when
-  # an ExternalId is supplied. Free-tier installs leave ExternalId empty.
-  EnableScanner: !Not [ !Equals [ !Ref ExternalId, "" ] ]
+  # The cross-account security scanner is a paid feature, created only when BOTH
+  # an ExternalId and a VendorAccountId are supplied, so the trust never renders
+  # against an empty or defaulted account. Free-tier installs leave both empty.
+  EnableScanner: !And
+    - !Not [ !Equals [ !Ref ExternalId, "" ] ]
+    - !Not [ !Equals [ !Ref VendorAccountId, "" ] ]
   CreateKmsKey: !Equals [ !Ref ExistingKmsKeyArn, "" ]
-  CreateAcmCert: !And
-    - !Equals [ !Ref ExistingAcmCertArn, "" ]
-    - !Not [ !Equals [ !Ref HostedZoneId, "" ] ]
-  HasHostedZone: !Not [ !Equals [ !Ref HostedZoneId, "" ] ]
   EnableVpcEndpointsCond: !Equals [ !Ref EnableVpcEndpoints, "true" ]
   EnableVpcFlowLogsCond: !Equals [ !Ref EnableVpcFlowLogs, "true" ]
   EnableRdsPerformanceInsightsCond: !Equals [ !Ref EnableRdsPerformanceInsights, "true" ]
@@ -715,45 +714,37 @@ Resources:
       Tags:
         - { Key: gentrail:role, Value: rds-master }
 
-  # ── DynamoDB tables (mirror real aigentrail-*-dev schemas) ────────
+  # >>> GENERATED ddb-tables (source iac/ddb.cue, regen deploy/m3/scripts/gen-cfn.sh; do not hand-edit)
   TracesTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      TableName: !Sub "${DdbTableNamePrefix}-traces"
-      BillingMode: !Ref DdbBillingMode
-      AttributeDefinitions:
-        - { AttributeName: PK,     AttributeType: S }
-        - { AttributeName: SK,     AttributeType: S }
-        - { AttributeName: GSI1PK, AttributeType: S }
-        - { AttributeName: GSI2PK, AttributeType: S }
-        - { AttributeName: GSI3PK, AttributeType: S }
-      KeySchema:
-        - { AttributeName: PK, KeyType: HASH }
-        - { AttributeName: SK, KeyType: RANGE }
       GlobalSecondaryIndexes:
         - IndexName: agent-index
           KeySchema:
-            - { AttributeName: GSI1PK, KeyType: HASH }
-            - { AttributeName: SK,     KeyType: RANGE }
-          Projection: { ProjectionType: ALL }
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
         - IndexName: eval-index
           KeySchema:
-            - { AttributeName: GSI2PK, KeyType: HASH }
-            - { AttributeName: SK,     KeyType: RANGE }
-          Projection: { ProjectionType: ALL }
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
         - IndexName: span-index
           KeySchema:
-            - { AttributeName: GSI3PK, KeyType: HASH }
-            - { AttributeName: SK,     KeyType: RANGE }
-          # KEYS_ONLY matches infra/ingestion: the only consumer
-          # (LookupTraceBySpanID) reads just the SK.
-          Projection: { ProjectionType: KEYS_ONLY }
-      # TTL + stream feed the trace archiver (ArchiverFn below), matching
-      # infra/ingestion: expired traces are removed from hot storage and the
-      # REMOVE stream event archives them to TraceArchiveBucket. Never enable
-      # TTL without the archiver: expiry would delete data with no cold copy.
+            - AttributeName: GSI3PK
+              KeyType: HASH
+            - AttributeName: SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
@@ -762,123 +753,218 @@ Resources:
       SSESpecification:
         SSEEnabled: true
         SSEType: KMS
-        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
-      Tags:
-        - { Key: gentrail:table, Value: traces }
-
-  ViolationsTable:
-    Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      TableName: !Sub "${DdbTableNamePrefix}-violations"
-      BillingMode: !Ref DdbBillingMode
+        KMSMasterKeyId:
+          Fn::If:
+            - CreateKmsKey
+            - Fn::GetAtt:
+                - SubstrateKmsKey
+                - Arn
+            - Ref: ExistingKmsKeyArn
+      TableName:
+        Fn::Sub: ${DdbTableNamePrefix}-traces
+      BillingMode:
+        Ref: DdbBillingMode
       AttributeDefinitions:
-        - { AttributeName: PK,     AttributeType: S }
-        - { AttributeName: SK,     AttributeType: S }
-        - { AttributeName: GSI1PK, AttributeType: S }
-        - { AttributeName: GSI1SK, AttributeType: S }
-        - { AttributeName: GSI2PK, AttributeType: S }
-        - { AttributeName: GSI2SK, AttributeType: S }
-        - { AttributeName: GSI3PK, AttributeType: S }
-        - { AttributeName: GSI3SK, AttributeType: S }
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI3PK
+          AttributeType: S
       KeySchema:
-        - { AttributeName: PK, KeyType: HASH }
-        - { AttributeName: SK, KeyType: RANGE }
-      GlobalSecondaryIndexes:
-        - IndexName: org-recent-index
-          KeySchema:
-            - { AttributeName: GSI1PK, KeyType: HASH }
-            - { AttributeName: GSI1SK, KeyType: RANGE }
-          Projection: { ProjectionType: ALL }
-        - IndexName: rule-index
-          KeySchema:
-            - { AttributeName: GSI2PK, KeyType: HASH }
-            - { AttributeName: GSI2SK, KeyType: RANGE }
-          Projection: { ProjectionType: ALL }
-        - IndexName: source-index
-          KeySchema:
-            - { AttributeName: GSI3PK, KeyType: HASH }
-            - { AttributeName: GSI3SK, KeyType: RANGE }
-          Projection: { ProjectionType: ALL }
-      SSESpecification:
-        SSEEnabled: true
-        SSEType: KMS
-        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
       PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+        PointInTimeRecoveryEnabled:
+          Ref: DdbEnablePointInTimeRecovery
       Tags:
-        - { Key: gentrail:table, Value: violations }
-
+        - Key: gentrail:table
+          Value: traces
   AgentStatsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      TableName: !Sub "${DdbTableNamePrefix}-agent-stats"
-      BillingMode: !Ref DdbBillingMode
-      AttributeDefinitions:
-        - { AttributeName: PK,     AttributeType: S }
-        - { AttributeName: org_id, AttributeType: S }
-      KeySchema:
-        - { AttributeName: PK, KeyType: HASH }
       GlobalSecondaryIndexes:
         - IndexName: org-index
           KeySchema:
-            - { AttributeName: org_id, KeyType: HASH }
-          Projection: { ProjectionType: ALL }
+            - AttributeName: org_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
       SSESpecification:
         SSEEnabled: true
         SSEType: KMS
-        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
-      PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
-      Tags:
-        - { Key: gentrail:table, Value: agent-stats }
-
-  PolicyRulesTable:
-    Type: AWS::DynamoDB::Table
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      TableName: !Sub "${DdbTableNamePrefix}-policy-rules"
-      BillingMode: !Ref DdbBillingMode
+        KMSMasterKeyId:
+          Fn::If:
+            - CreateKmsKey
+            - Fn::GetAtt:
+                - SubstrateKmsKey
+                - Arn
+            - Ref: ExistingKmsKeyArn
+      TableName:
+        Fn::Sub: ${DdbTableNamePrefix}-agent-stats
+      BillingMode:
+        Ref: DdbBillingMode
       AttributeDefinitions:
-        - { AttributeName: PK, AttributeType: S }
-        - { AttributeName: SK, AttributeType: S }
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: org_id
+          AttributeType: S
       KeySchema:
-        - { AttributeName: PK, KeyType: HASH }
-        - { AttributeName: SK, KeyType: RANGE }
-      SSESpecification:
-        SSEEnabled: true
-        SSEType: KMS
-        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+        - AttributeName: PK
+          KeyType: HASH
       PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+        PointInTimeRecoveryEnabled:
+          Ref: DdbEnablePointInTimeRecovery
       Tags:
-        - { Key: gentrail:table, Value: policy-rules }
-
+        - Key: gentrail:table
+          Value: agent-stats
   ApiKeysTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      TableName: !Sub "${DdbTableNamePrefix}-api-keys"
-      BillingMode: !Ref DdbBillingMode
-      AttributeDefinitions:
-        - { AttributeName: token, AttributeType: S }
-      KeySchema:
-        - { AttributeName: token, KeyType: HASH }
       SSESpecification:
         SSEEnabled: true
         SSEType: KMS
-        KMSMasterKeyId: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+        KMSMasterKeyId:
+          Fn::If:
+            - CreateKmsKey
+            - Fn::GetAtt:
+                - SubstrateKmsKey
+                - Arn
+            - Ref: ExistingKmsKeyArn
+      TableName:
+        Fn::Sub: ${DdbTableNamePrefix}-api-keys
+      BillingMode:
+        Ref: DdbBillingMode
+      AttributeDefinitions:
+        - AttributeName: token
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token
+          KeyType: HASH
       PointInTimeRecoverySpecification:
-        PointInTimeRecoveryEnabled: !Ref DdbEnablePointInTimeRecovery
+        PointInTimeRecoveryEnabled:
+          Ref: DdbEnablePointInTimeRecovery
       Tags:
-        - { Key: gentrail:table, Value: api-keys }
+        - Key: gentrail:table
+          Value: api-keys
+  ViolationsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      GlobalSecondaryIndexes:
+        - IndexName: org-recent-index
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: rule-index
+          KeySchema:
+            - AttributeName: GSI2PK
+              KeyType: HASH
+            - AttributeName: GSI2SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: source-index
+          KeySchema:
+            - AttributeName: GSI3PK
+              KeyType: HASH
+            - AttributeName: GSI3SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId:
+          Fn::If:
+            - CreateKmsKey
+            - Fn::GetAtt:
+                - SubstrateKmsKey
+                - Arn
+            - Ref: ExistingKmsKeyArn
+      TableName:
+        Fn::Sub: ${DdbTableNamePrefix}-violations
+      BillingMode:
+        Ref: DdbBillingMode
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+        - AttributeName: GSI2PK
+          AttributeType: S
+        - AttributeName: GSI2SK
+          AttributeType: S
+        - AttributeName: GSI3PK
+          AttributeType: S
+        - AttributeName: GSI3SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled:
+          Ref: DdbEnablePointInTimeRecovery
+      Tags:
+        - Key: gentrail:table
+          Value: violations
+  PolicyRulesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId:
+          Fn::If:
+            - CreateKmsKey
+            - Fn::GetAtt:
+                - SubstrateKmsKey
+                - Arn
+            - Ref: ExistingKmsKeyArn
+      TableName:
+        Fn::Sub: ${DdbTableNamePrefix}-policy-rules
+      BillingMode:
+        Ref: DdbBillingMode
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled:
+          Ref: DdbEnablePointInTimeRecovery
+      Tags:
+        - Key: gentrail:table
+          Value: policy-rules
+  # <<< GENERATED ddb-tables
 
   # ── S3 buckets ────────────────────────────────────────────────────
   EvidenceBucket:
@@ -1271,6 +1357,15 @@ Resources:
                 Effect: Allow
                 Action: sts:AssumeRole
                 Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/gentrail-readonly-${AWS::Region}"
+              # The dashboard's tool classifier invokes Amazon Nova (a first-party
+              # model, so no per-account model-access grant is needed) on the
+              # cross-region inference profile and the foundation model behind it.
+              - Sid: BedrockClassify
+                Effect: Allow
+                Action: bedrock:InvokeModel
+                Resource:
+                  - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/us.amazon.nova-lite-v1:0"
+                  - "arn:aws:bedrock:*::foundation-model/amazon.nova-lite-v1:0"
       Tags:
         - { Key: gentrail:service-account, Value: dashboard }
 
@@ -1509,22 +1604,10 @@ Resources:
         - { Key: gentrail:service-account, Value: authproxy }
 
   # ── ACM cert (conditional) ──────────────────────────────────────
-  AcmCertificate:
-    Condition: CreateAcmCert
-    Type: AWS::CertificateManager::Certificate
-    Properties:
-      DomainName: !Ref Hostname
-      ValidationMethod: DNS
-      DomainValidationOptions:
-        - DomainName: !Ref Hostname
-          HostedZoneId: !Ref HostedZoneId
-      Tags:
-        - { Key: gentrail:role, Value: alb-cert }
-
-  # Note: ALB itself is created by the AWS Load Balancer Controller from
-  # the Ingress resource in the Helm chart - NOT here. The Route 53 alias
-  # record is created post-helm-install via a one-line aws CLI command
-  # documented in the runbook (Task 23).
+  # Note: the ALB is created by the AWS Load Balancer Controller from the Ingress
+  # in the Helm chart - NOT here. For HTTPS, pass ExistingAcmCertArn (a BYO ACM
+  # cert); point your own DNS at the ALB post-install (a one-line aws CLI command
+  # in the runbook). CFN manages no Route 53 zones, records, or certs.
 
   # ── Trace archiver (DDB stream → S3, parity with infra/ingestion) ─
   ArchiverRole:
@@ -1731,8 +1814,8 @@ Outputs:
     Value: !Ref DdbTableNamePrefix
 
   AcmCertArn:
-    Description: ACM cert ARN (created here or BYO)
-    Value: !If [ CreateAcmCert, !Ref AcmCertificate, !Ref ExistingAcmCertArn ]
+    Description: ACM cert ARN for the public ALB(s); empty for HTTP (BYO)
+    Value: !Ref ExistingAcmCertArn
 
   Hostname:
     Value: !Ref Hostname

@@ -48,7 +48,7 @@ spec:
               value: "{{ .Values.ddb.tablePrefix }}-policy-rules{{ .Values.ddb.tableSuffix }}"
 {{- include "gentrail.licenseEnv" . | nindent 12 }}
 {{- include "gentrail.localEnv" . | nindent 12 }}
-            {{- if and .Values.irsa.evaluator .Values.aws.irsaInjectToken }}
+            {{- if and .Values.irsa.evaluator (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaEnv" .Values.irsa.evaluator | nindent 12 }}
             {{- end }}
           resources: {{- toYaml .Values.evaluator.resources | nindent 12 }}
@@ -62,11 +62,11 @@ spec:
             periodSeconds: 30
           volumeMounts:
 {{- include "gentrail.licenseMount" . | nindent 12 }}
-          {{- if and .Values.irsa.evaluator .Values.aws.irsaInjectToken }}
+          {{- if and .Values.irsa.evaluator (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenMount" . | nindent 12 }}
           {{- end }}
       volumes:
 {{- include "gentrail.licenseVolume" . | nindent 8 }}
-          {{- if and .Values.irsa.evaluator .Values.aws.irsaInjectToken }}
+          {{- if and .Values.irsa.evaluator (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
           {{- end }}
