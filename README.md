@@ -13,7 +13,24 @@ a tier, then you paste your license in the dashboard.
 Get a free evaluation license (10 agents, 60 days) at https://gentrail.ai/#license.
 You paste it into the dashboard after install; there is nothing to set up first.
 
-## 2. Pick a tier
+## 2. Quickstart: evaluation with the CLI
+
+For the evaluation tier the `gentrail` CLI is the one-command path: it embeds the
+CloudFormation template (no repo clone) and shows each step as it stands up a bare
+k3s box over SSM. `connect` needs the AWS Session Manager plugin and `kubectl`, as
+the script does.
+
+```bash
+curl -LsSf https://gentrail.ai/install.sh | sh   # install the gentrail CLI
+gentrail install --tier evaluation               # stand up the box (~5 min)
+gentrail connect                                 # tunnel the dashboard to localhost:8001
+```
+
+Paste your license in the dashboard, then send a trace (step 7). `gentrail status`
+reports health and `gentrail teardown` removes the box. Production (EKS + RDS) uses
+the cloned-repo scripts below; the CLI covers evaluation only.
+
+## 3. Pick a tier
 
 `./install.sh` asks which tier to stand up (or pass `--tier=eval` / `--tier=prod`
 to skip the prompt):
@@ -28,7 +45,7 @@ to skip the prompt):
 Both keep all data in your account. Start on Evaluation; move to Production when
 you need HA and the compliance posture.
 
-## 3. Prerequisites
+## 4. Prerequisites
 
 ```bash
 git clone https://github.com/aigentrail/gentrail-byoc-edition.git
@@ -50,7 +67,7 @@ keeps `iam:*` because the stack creates named roles), or use
 `arn:aws:iam::aws:policy/AdministratorAccess` for the simplest path. Evaluation needs
 only the EC2, IAM, and SSM subset.
 
-## 4. Install
+## 5. Install
 
 ```bash
 ./install.sh                 # then pick a tier
@@ -71,7 +88,7 @@ license; on Production paste it in the dashboard). On Production, `PUBLIC_OTEL_H
 makes OTLP ingest internet-facing while the dashboard stays internal, and
 `PUBLIC_HOST` also exposes the dashboard.
 
-## 5. Open the dashboard
+## 6. Open the dashboard
 
 ```bash
 ./connect.sh                 # leave it running; Ctrl-C to disconnect
@@ -83,7 +100,7 @@ the EKS API). Open http://localhost:8001. There is no login; every page redirect
 to the license input until you paste your license, then every service activates
 within about two minutes.
 
-## 6. Send a trace
+## 7. Send a trace
 
 Generate an API key in the dashboard (Integrations, then API keys), install the
 SDK, and run an agent pointed at the OTLP endpoint `./connect.sh` printed. See the
