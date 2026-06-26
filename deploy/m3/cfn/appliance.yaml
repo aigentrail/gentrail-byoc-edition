@@ -37,6 +37,15 @@ Parameters:
     Default: main
     Description: Branch of the public repo to clone (pin a release branch, or a test branch).
 
+  SelfInstall:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: >-
+      true (the bash installer): the box installs the chart itself on first boot.
+      false (the gentrail CLI): the box boots bare k3s and the CLI drives the chart
+      install over SSM so it shows as discrete steps.
+
   LicenseJwt:
     Type: String
     Default: ""
@@ -47,10 +56,13 @@ Parameters:
 
   VpcCidr:
     Type: String
-    Default: 10.42.0.0/16
+    # Must not overlap k3s's default pod CIDR 10.42.0.0/16 or service CIDR
+    # 10.43.0.0/16: a collision shadows the VPC DNS resolver (.2) behind the pod
+    # network, so coredns loop-detects, dies, and cluster DNS goes down.
+    Default: 10.20.0.0/16
   SubnetCidr:
     Type: String
-    Default: 10.42.0.0/24
+    Default: 10.20.0.0/24
 
 Conditions:
   HasLicense: !Not [!Equals [!Ref LicenseJwt, ""]]
@@ -191,38 +203,58 @@ Resources:
             curl -sfL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz | tar -xz -C /tmp
             install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
 
-            # The cloned public repo is the chart source (no OCI dependency): helm
-            # installs from its local path and the init specs come from the same clone.
-            GENTRAIL_DIR=/opt/gentrail
-            git clone --depth 1 --branch "${RepoBranch}" "${PublicRepoUrl}" "$GENTRAIL_DIR"
-            CHART="$GENTRAIL_DIR/deploy/m3/helm/gentrail"
-            INIT_DIR="$GENTRAIL_DIR/deploy/m3/init"
+            # The license is written to a 0600 root-only file (not baked into a script
+            # or passed on the helm command line) so it never lands in the world and
+            # never reaches SSM-retained command output. xtrace is off around the write.
+            mkdir -p /opt/gentrail
+            set +x
+            ${LicenseWrite}
+            set -x
 
-            # Build the init-aws ConfigMap before helm so the Job's mount resolves.
-            # --from-file flattens every spec beside init-aws.sh at /init (TABLES_DIR=/init).
+            # fetch.sh + install.sh are baked once and either run inline below
+            # (SelfInstall=true, the bash installer) or triggered over SSM by the
+            # gentrail CLI (SelfInstall=false) so the install renders as discrete steps.
+            # Each re-exports KUBECONFIG because the CLI runs them as separate SSM
+            # invocations sharing no shell state. The script bash vars stay brace-free so
+            # CFN !Sub leaves them alone and only substitutes RepoBranch / PublicRepoUrl.
+            cat > /opt/gentrail/fetch.sh <<'FETCH'
+            #!/bin/bash
+            set -euo pipefail
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            SRC=/opt/gentrail/src
+            rm -rf "$SRC"
+            git clone --depth 1 --branch "${RepoBranch}" "${PublicRepoUrl}" "$SRC"
+            INIT_DIR="$SRC/deploy/m3/init"
             k3s kubectl create namespace gentrail --dry-run=client -o yaml | k3s kubectl apply -f -
             CM_ARGS="--from-file=init-aws.sh=$INIT_DIR/init-aws.sh"
             for f in "$INIT_DIR"/tables/*.json; do CM_ARGS="$CM_ARGS --from-file=$(basename "$f")=$f"; done
-            # shellcheck disable=SC2086
-            k3s kubectl -n gentrail create configmap init-aws $CM_ARGS \
-              --dry-run=client -o yaml | k3s kubectl apply -f -
-
+            k3s kubectl -n gentrail create configmap init-aws $CM_ARGS --dry-run=client -o yaml | k3s kubectl apply -f -
+            FETCH
+            cat > /opt/gentrail/install.sh <<'INSTALL'
+            #!/bin/bash
+            set -euo pipefail
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            CHART=/opt/gentrail/src/deploy/m3/helm/gentrail
             LICENSE_SET=""
-            ${LicenseSetLine}
-            # shellcheck disable=SC2086
-            helm upgrade --install gentrail "$CHART" \
-              --namespace gentrail \
-              -f "$CHART/values-appliance.yaml" \
-              --set createNamespace=false \
-              $LICENSE_SET \
-              --wait --timeout 15m
+            if [ -f /opt/gentrail/license.jwt ]; then LICENSE_SET="--set-file license.jwt=/opt/gentrail/license.jwt"; fi
+            helm upgrade --install gentrail "$CHART" --namespace gentrail -f "$CHART/values-appliance.yaml" --set createNamespace=false $LICENSE_SET --wait --timeout 15m
+            INSTALL
+            chmod 600 /opt/gentrail/fetch.sh /opt/gentrail/install.sh
+
+            # signal fires after the scripts in true mode and after bare k3s in false
+            # mode (the CLI then drives fetch/install over SSM); local-path is already
+            # Available above either way, so helm --wait can bind the StatefulSet PVCs.
+            if [ "${SelfInstall}" = "true" ]; then
+              bash /opt/gentrail/fetch.sh
+              bash /opt/gentrail/install.sh
+            fi
 
             trap - ERR
             signal 0
-            echo "gentrail appliance install complete"
-          - LicenseSetLine: !If
+            echo "gentrail appliance bootstrap complete (SelfInstall=${SelfInstall})"
+          - LicenseWrite: !If
               - HasLicense
-              - !Sub 'LICENSE_SET="--set-string license.jwt=${LicenseJwt}"'
+              - !Sub '( umask 077; printf "%s" "${LicenseJwt}" > /opt/gentrail/license.jwt )'
               - "true"
     CreationPolicy:
       ResourceSignal:
