@@ -23,13 +23,13 @@ image:
   # dev deploy overrides this to ghcr in infra/k3s-apps. images.yml mirrors every
   # release tag from ghcr to this registry.
   registry: public.ecr.aws/p6a2v1k1
-  tag: v0.2.0
+  tag: v0.2.1
   pullPolicy: IfNotPresent
   pullSecret: ""
 
 ingress:
   host: ""     # dashboard FQDN (only needed when its ALB is internet-facing)
-  otelHost: "" # OTLP ingest FQDN for the authproxy (otel.aigentrail.com)
+  otelHost: "" # OTLP ingest FQDN for the authproxy (otel.gentrail.ai)
   certArn: ""  # ACM cert for the public host(s); with it the ALB serves HTTPS, else HTTP
   # ALB scheme per endpoint, controlled independently. internal = reachable only
   # inside the VPC / over VPN (clients use the ALB DNS name); false =
@@ -199,7 +199,7 @@ docsServer:
   docsTarballKey: "intranet-docs/docs.tar.gz"
   # Session cookie Domain for the wiki. Empty inherits dashboard.cookieDomain
   # (same parent domain). Set explicitly when the wiki lives on a different
-  # parent (e.g. ".gentrail.ai" while the dashboard is on aigentrail.com).
+  # parent (e.g. ".gentrail.ai" for the wiki while the dashboard sits on a different parent).
   cookieDomain: ""
   # In-cluster dashboard URL the wiki's login form bridges to (shared auth API).
   dashboardInternalUrl: "http://dashboard:8001"

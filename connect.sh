@@ -25,7 +25,8 @@ OTEL_PORT="${OTEL_PORT:-4318}"
 
 for t in aws kubectl; do command -v "$t" >/dev/null || { echo "missing required tool: $t" >&2; exit 1; }; done
 
-# The appliance stack tags itself Tier=eval; the EKS stack has no such output.
+# The appliance stack outputs Tier=eval, the EKS substrate Tier=prod; older stacks
+# output neither, so anything but eval is treated as prod.
 TIER="${TIER:-}"
 if [ -z "$TIER" ]; then
   TIER="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \

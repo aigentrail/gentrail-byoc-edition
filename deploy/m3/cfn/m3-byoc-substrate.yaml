@@ -1758,6 +1758,9 @@ Resources:
       Region: !Ref AWS::Region
 
 Outputs:
+  Tier:
+    Description: Marks this stack as the production (EKS/RDS) substrate tier.
+    Value: prod
   ClusterName:
     Description: EKS cluster name (used by aws eks update-kubeconfig)
     Value: !Ref EksCluster

@@ -24,7 +24,8 @@ command -v aws >/dev/null || { echo "missing required tool: aws" >&2; exit 1; }
 
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
-# The appliance stack tags itself Tier=eval; the EKS stack has no such output.
+# The appliance stack outputs Tier=eval, the EKS substrate Tier=prod; older stacks
+# output neither, so anything but eval is treated as prod.
 TIER="${TIER:-}"
 if [ -z "$TIER" ]; then
   TIER="$(aws cloudformation describe-stacks --stack-name "$STACK" --region "$REGION" \

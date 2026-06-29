@@ -34,7 +34,7 @@ cloudflared:
 
 image:
   registry: public.ecr.aws/p6a2v1k1
-  tag: v0.2.0
+  tag: v0.2.1
 
 # Quoted so an empty CFN output renders as "" (a valid string for the chart
 # schema) rather than a bare null. certArn is empty when no cert was passed; the
