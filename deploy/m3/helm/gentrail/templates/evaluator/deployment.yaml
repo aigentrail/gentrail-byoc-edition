@@ -46,6 +46,8 @@ spec:
               value: "{{ .Values.ddb.tablePrefix }}-agent-stats{{ .Values.ddb.tableSuffix }}"
             - name: DYNAMO_POLICY_RULES_TABLE
               value: "{{ .Values.ddb.tablePrefix }}-policy-rules{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_WINDOW_MARKERS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-window-markers{{ .Values.ddb.tableSuffix }}"
 {{- include "gentrail.licenseEnv" . | nindent 12 }}
 {{- include "gentrail.localEnv" . | nindent 12 }}
             {{- if and .Values.irsa.evaluator (eq .Values.mode "k3s") }}

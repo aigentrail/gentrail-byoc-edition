@@ -26,6 +26,10 @@ gentrail install --tier evaluation               # stand up the box (~5 min)
 gentrail connect                                 # tunnel the dashboard to localhost:8001
 ```
 
+On Windows, download `gentrail-windows-amd64.exe` (or `-arm64`) from this repo's
+latest release, rename it to `gentrail.exe`, and put it on your `PATH`; the
+commands above work the same from PowerShell.
+
 Paste your license in the dashboard, then send a trace (step 7). `gentrail status`
 reports health and `gentrail teardown` removes the box. Production (EKS + RDS) uses
 the cloned-repo scripts below; the CLI covers evaluation only.

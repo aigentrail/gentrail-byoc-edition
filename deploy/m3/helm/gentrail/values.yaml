@@ -23,7 +23,7 @@ image:
   # dev deploy overrides this to ghcr in infra/k3s-apps. images.yml mirrors every
   # release tag from ghcr to this registry.
   registry: public.ecr.aws/p6a2v1k1
-  tag: v0.2.1
+  tag: v0.3.0
   pullPolicy: IfNotPresent
   pullSecret: ""
 
@@ -67,6 +67,7 @@ networkPolicies:
 
 s3:
   evidenceBucket: ""
+  traceArchiveBucket: ""
 
 rds:
   endpoint: ""
@@ -94,6 +95,8 @@ irsa:
   evaluator: ""
   authproxy: ""
   docsServer: ""
+  agentChat: ""
+  marketingConsole: ""
 
 license:
   secretRef: gentrail-license
@@ -122,6 +125,10 @@ dashboard:
   ingestionEndpoint: ""
   # Absolute base for links in notification emails; empty falls back to relative.
   baseUrl: ""
+  # SES from-address for notification email delivery (needs a verified SES
+  # identity + ses:SendEmail on the dashboard role). Empty keeps the notify
+  # worker in log-only dry-run: rows are marked skipped, nothing is sent.
+  notificationsFrom: ""
   # Match the live env to share the session cookie (SSO across hosts, and
   # existing sessions survive a hostname cutover). Unset falls back to a
   # host-only cookie signed with the built-in "dev" secret.
@@ -206,3 +213,89 @@ docsServer:
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits:   { cpu: 250m, memory: 150Mi }
+
+# agent-chat (the live governance demo UI). Our-cloud-only: enabled false so a
+# BYOC install never renders it. dashApi/ingest are in-cluster; dashPublic is
+# only for browser links. cookieDomain empty inherits dashboard.cookieDomain so
+# it reads the shared gentrail_session cookie.
+agentChat:
+  enabled: false
+  org: "northwind"
+  dashApi: "http://dashboard:8001"
+  ingest: "http://authproxy:4318"
+  dashPublic: ""
+  cookieDomain: ""
+  port: 8080
+  resources:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 200Mi }
+
+# marketing-console (the campaign-link UI). Our-cloud-only: enabled false so a
+# BYOC install never renders it. gatewayUrl is the events-gateway public API base
+# (infra/k3s-apps reads it from that stack's remote state); adminSecretParam is
+# fetched from SSM at boot via IRSA (irsa.marketingConsole), so the admin secret
+# never lands in values or state. dashboardInternalUrl is the in-cluster dashboard
+# its login form bridges to (docs-server pattern). cookieDomain is set per stage by
+# infra/k3s-apps: parent-scoped (.gentrail.ai) on prod so the console shares the one
+# gentrail_session with dashboard + wiki, host-scoped on dev where a flat-sibling
+# host cannot read the dashboard's cookie (the bridge mints its own there).
+marketingConsole:
+  enabled: false
+  gatewayUrl: ""
+  adminSecretParam: "/aigentrail/events-gateway/admin-secret"
+  publicBase: "https://gentrail.ai"
+  # Origin+prefix tracked links hang off. Empty = publicBase + /go. Prod sets the
+  # short host https://link.gentrail.ai (infra/k3s-apps).
+  shortBase: ""
+  dashboardInternalUrl: "http://dashboard:8001"
+  cookieDomain: ""
+  port: 8085
+  resources:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits:   { cpu: 250m, memory: 150Mi }
+
+# Metabase (the internal analytics portal). Our-cloud-only: enabled false so a
+# BYOC install never renders it (like docsServer/cloudflared). infra/k3s-apps
+# enables it, creates the app-DB connection secret it references, routes
+# metabase.gentrail.ai to the metabase Service on the k3s tunnel, and gates that
+# hostname with Cloudflare Access (SSO/email allowlist).
+#
+# It uses an external public image (metabase/metabase), so the image is given as
+# repository+tag here rather than via image.registry/image.tag (which point at
+# the gentrail registry). The app DB is a dedicated `metabase` Postgres database
+# on the shared RDS — never the default H2 file DB. The read-only `metrics`
+# datasource (v_events) is added by an operator in the Metabase UI, not here.
+metabase:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: metabase/metabase
+    # v0.53+ (open-source edition) is the first multi-arch tag with linux/arm64;
+    # v0.50-0.52 are amd64-only and exec-format-crash on the Graviton k3s node.
+    # Bump deliberately (metabase runs one-way app-DB migrations on startup).
+    tag: v0.53.11
+    pullPolicy: IfNotPresent
+  # k8s secret holding key "connection-uri": the full Postgres DSN for Metabase's
+  # own application database (postgres://...:5432/metabase?sslmode=require).
+  # infra/k3s-apps creates it (kubernetes_secret_v1.metabase_appdb).
+  appDbSecretName: gentrail-metabase-appdb
+  # JVM app: ~512Mi resident at rest, spikes during query/migration. Request 512Mi
+  # so it schedules onto a node with headroom; cap at 2Gi to bound the heap
+  # (matches the watch-item in the deploy spec).
+  resources:
+    requests: { cpu: 250m, memory: 512Mi }
+    limits:   { cpu: 1000m, memory: 2Gi }
+  # The board-sync hook Job reconciles the committed dashboards/*.sql into
+  # Metabase as native questions on every chart apply.
+  # The metrics datasource + the api-key SSM parameter must already exist.
+  boardSync:
+    enabled: false
+    metabaseUrl: http://metabase:3000
+    apiKeyParam: /aigentrail/metabase/api-key
+    # The Metabase display name of the metrics datasource (set in the Metabase UI),
+    # not the Postgres database name.
+    metricsDbName: Gentrail metrics
+    collection: Analytics
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits:   { cpu: 250m, memory: 256Mi }

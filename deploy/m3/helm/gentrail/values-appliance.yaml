@@ -45,6 +45,7 @@ networkPolicies:
 # has no S3 endpoint-override in Go, so there is no in-cluster MinIO substitute today.
 s3:
   evidenceBucket: ""
+  traceArchiveBucket: ""
 
 # EKS-only RDS bootstrap; unused because local.enabled supplies gentrail-rds-secret.
 rds:

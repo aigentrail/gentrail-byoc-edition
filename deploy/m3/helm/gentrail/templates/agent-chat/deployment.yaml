@@ -1,0 +1,83 @@
+{{- if .Values.agentChat.enabled }}
+# agent-chat: live governance demo UI, our-cloud-only (gated off for BYOC).
+# Drives the real Bedrock agents via InvokeAgent (IRSA); every request is gated
+# on the shared dashboard session cookie (AIGENTRAIL_SESSION_SECRET).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-chat
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "agent-chat") .) | indent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "agent-chat") .) | indent 6 }}
+  template:
+    metadata:
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "agent-chat") .) | indent 8 }}
+    spec:
+      serviceAccountName: agent-chat
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
+      containers:
+        - name: agent-chat
+          image: {{ include "gentrail.image" (merge (dict "component" "agent-chat") .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.agentChat.port }}
+          env:
+            - name: CHAT_PORT
+              value: {{ .Values.agentChat.port | quote }}
+            - name: ORG
+              value: {{ .Values.agentChat.org | quote }}
+            - name: DASH_API
+              value: {{ .Values.agentChat.dashApi | quote }}
+            - name: INGEST
+              value: {{ .Values.agentChat.ingest | quote }}
+            {{- if .Values.agentChat.dashPublic }}
+            - name: DASH_PUBLIC
+              value: {{ .Values.agentChat.dashPublic | quote }}
+            {{- end }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            {{- $cookieDomain := .Values.agentChat.cookieDomain | default .Values.dashboard.cookieDomain }}
+            {{- if $cookieDomain }}
+            - name: AIGENTRAIL_COOKIE_DOMAIN
+              value: {{ $cookieDomain | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.sessionSecretName }}
+            - name: AIGENTRAIL_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.dashboard.sessionSecretName }}
+                  key: session-secret
+            {{- end }}
+            {{- if and .Values.irsa.agentChat (eq .Values.mode "k3s") }}
+{{- include "gentrail.irsaEnv" .Values.irsa.agentChat | nindent 12 }}
+            {{- end }}
+          resources: {{- toYaml .Values.agentChat.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          {{- if and .Values.irsa.agentChat (eq .Values.mode "k3s") }}
+          volumeMounts:
+{{- include "gentrail.irsaTokenMount" . | nindent 12 }}
+          {{- end }}
+      {{- if and .Values.irsa.agentChat (eq .Values.mode "k3s") }}
+      volumes:
+{{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
+      {{- end }}
+{{- end }}

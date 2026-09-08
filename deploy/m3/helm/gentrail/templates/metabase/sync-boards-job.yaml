@@ -1,0 +1,76 @@
+{{- if and .Values.metabase.enabled .Values.metabase.boardSync.enabled }}
+# Post-upgrade hook: reconciles the committed dashboards/*.sql into Metabase as
+# native questions via the metabase-sync tool. Runs after the release applies,
+# so the metabase Deployment already exists; the tool waits on /api/health before
+# syncing. Best-effort (BEST_EFFORT set) so a Metabase hiccup never fails the
+# chart apply. The metrics datasource must already be registered in Metabase.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: metabase-sync
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "metabase-sync") .) | indent 4 }}
+  annotations:
+    eks.amazonaws.com/role-arn: {{ .Values.irsa.metabaseSync | quote }}
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: metabase-sync
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "metabase-sync") .) | indent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "metabase-sync") .) | indent 8 }}
+    spec:
+      serviceAccountName: metabase-sync
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+{{ include "gentrail.imagePullSecrets" . | indent 6 }}
+      containers:
+        - name: metabase-sync
+          image: {{ include "gentrail.image" (merge (dict "component" "metabase-sync") .) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: METABASE_URL
+              value: {{ .Values.metabase.boardSync.metabaseUrl | quote }}
+            - name: METABASE_API_KEY_PARAM
+              value: {{ .Values.metabase.boardSync.apiKeyParam | quote }}
+            - name: METRICS_DB_NAME
+              value: {{ .Values.metabase.boardSync.metricsDbName | quote }}
+            - name: COLLECTION
+              value: {{ .Values.metabase.boardSync.collection | quote }}
+            - name: BEST_EFFORT
+              value: "1"
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | quote }}
+            {{- if and .Values.irsa.metabaseSync (eq .Values.mode "k3s") }}
+{{- include "gentrail.irsaEnv" .Values.irsa.metabaseSync | nindent 12 }}
+            {{- end }}
+          resources: {{- toYaml .Values.metabase.boardSync.resources | nindent 12 }}
+          {{- if and .Values.irsa.metabaseSync (eq .Values.mode "k3s") }}
+          volumeMounts:
+{{- include "gentrail.irsaTokenMount" . | nindent 12 }}
+          {{- end }}
+      {{- if and .Values.irsa.metabaseSync (eq .Values.mode "k3s") }}
+      volumes:
+{{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+# Patterns Helm excludes when loading/packaging the chart. Without this, Helm
+# would try to render Markdown docs under templates/ as Kubernetes manifests and
+# fail (e.g. templates/metabase/README.md). Keep component docs next to their
+# templates while keeping `helm template`/`helm install` clean.
+README.md
+*.md

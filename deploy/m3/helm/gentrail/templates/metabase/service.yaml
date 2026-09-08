@@ -1,0 +1,20 @@
+{{- if .Values.metabase.enabled }}
+# In-cluster Service the Cloudflare Tunnel routes metabase.gentrail.ai to
+# (http://metabase:3000). ClusterIP only — never exposed outside the cluster
+# except through the tunnel, which is gated by Cloudflare Access.
+apiVersion: v1
+kind: Service
+metadata:
+  name: metabase
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "metabase") .) | indent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3000
+      targetPort: http
+      name: http
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "metabase") .) | indent 4 }}
+{{- end }}

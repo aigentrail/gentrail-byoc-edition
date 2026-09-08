@@ -215,6 +215,82 @@ spec:
     - ports:
         - { protocol: TCP, port: 8090 }
 {{- end }}
+{{- if .Values.agentChat.enabled }}
+---
+# agent-chat reaches AWS (443: bedrock InvokeAgent + dynamodb + STS), the
+# dashboard (8001: /decide + approvals), the authproxy (4318: OTLP), and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-chat-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: agent-chat
+  policyTypes: [ Egress ]
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 8001 }
+        - { protocol: TCP, port: 4318 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Allow cloudflared (tunnel) + the kubelet probe to reach agent-chat on 8080.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-chat-ingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: agent-chat
+  policyTypes: [ Ingress ]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }
+{{- end }}
+{{- if .Values.marketingConsole.enabled }}
+---
+# marketing-console reaches AWS (443: the events-gateway API Gateway + SSM/STS for
+# the admin-secret fetch), the dashboard auth bridge (8001: its login form posts
+# credentials there), and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: marketing-console-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: marketing-console
+  policyTypes: [ Egress ]
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 8001 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Allow cloudflared (tunnel) + the kubelet probe to reach marketing-console on 8085.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: marketing-console-ingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: marketing-console
+  policyTypes: [ Ingress ]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8085 }
+{{- end }}
 {{- if .Values.cloudflared.enabled }}
 ---
 # cloudflared reaches Cloudflare's edge (443) and the in-cluster Services.
@@ -244,6 +320,15 @@ spec:
         {{- if .Values.sidecar.enabled }}
         - { protocol: TCP, port: 8090 }
         {{- end }}
+        {{- if .Values.metabase.enabled }}
+        - { protocol: TCP, port: 3000 }
+        {{- end }}
+        {{- if .Values.agentChat.enabled }}
+        - { protocol: TCP, port: 8080 }
+        {{- end }}
+        {{- if .Values.marketingConsole.enabled }}
+        - { protocol: TCP, port: 8085 }
+        {{- end }}
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
 ---
@@ -261,5 +346,65 @@ spec:
   ingress:
     - ports:
         - { protocol: TCP, port: 2000 }
+{{- end }}
+{{- if .Values.metabase.enabled }}
+---
+# Metabase reaches its Postgres app DB + the metrics datasource (both on the
+# shared RDS, 5432) and DNS; no 443, it never touches the AWS APIs. The chart
+# must own this: the manual bring-up netpols selected app=metabase, which never
+# matches these chart-labelled pods on the default-deny namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metabase-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: metabase
+  policyTypes: [ Egress ]
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 5432 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Allow cloudflared (tunnel) + the kubelet probe to reach metabase on 3000.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metabase-ingress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: metabase
+  policyTypes: [ Ingress ]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 3000 }
+{{- if .Values.metabase.boardSync.enabled }}
+---
+# The board-sync hook Job reaches Metabase on 3000 and SSM/KMS on 443 (the API
+# key), plus DNS. Default-deny, so without this the Job cannot connect at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: metabase-sync-egress
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: metabase-sync
+  policyTypes: [ Egress ]
+  egress:
+    - to: []
+      ports:
+        - { protocol: TCP, port: 3000 }
+        - { protocol: TCP, port: 443 }
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+{{- end }}
 {{- end }}
 {{- end }}

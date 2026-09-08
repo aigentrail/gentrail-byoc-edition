@@ -7,7 +7,7 @@
 # The table schemas are NOT hand-authored here: each tables/<name>.json is an
 # `aws dynamodb create-table --cli-input-json` document generated from iac/ddb.cue
 # (the same model the CFN template and the OpenTofu tables come from). Edit the
-# model and regenerate with deploy/m3/scripts/gen-all.sh; TestInitAwsTablesMatchModel
+# model and regenerate with `nix run .#gen`; TestInitAwsTablesMatchModel
 # guards the committed files. Adding a table is then automatic here.
 set -eu
 

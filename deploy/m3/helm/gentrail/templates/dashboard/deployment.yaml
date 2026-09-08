@@ -42,9 +42,17 @@ spec:
               value: "{{ .Values.ddb.tablePrefix }}-policy-rules{{ .Values.ddb.tableSuffix }}"
             - name: DYNAMO_API_KEYS_TABLE
               value: "{{ .Values.ddb.tablePrefix }}-api-keys{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_WINDOW_MARKERS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-window-markers{{ .Values.ddb.tableSuffix }}"
+            - name: DYNAMO_HEARTBEATS_TABLE
+              value: "{{ .Values.ddb.tablePrefix }}-heartbeats{{ .Values.ddb.tableSuffix }}"
             - name: EVIDENCE_BUCKET
               value: {{ .Values.s3.evidenceBucket | quote }}
             - name: EVIDENCE_BUCKET_REGION
+              value: {{ .Values.aws.region | quote }}
+            - name: TRACE_ARCHIVE_BUCKET
+              value: {{ .Values.s3.traceArchiveBucket | default "" | quote }}
+            - name: TRACE_ARCHIVE_BUCKET_REGION
               value: {{ .Values.aws.region | quote }}
             - name: NATS_URL
               value: "nats://nats:4222"
@@ -71,6 +79,10 @@ spec:
             {{- if .Values.dashboard.baseUrl }}
             - name: AIGENTRAIL_DASHBOARD_BASE_URL
               value: {{ .Values.dashboard.baseUrl | quote }}
+            {{- end }}
+            {{- if .Values.dashboard.notificationsFrom }}
+            - name: AIGENTRAIL_NOTIFICATIONS_SES_FROM
+              value: {{ .Values.dashboard.notificationsFrom | quote }}
             {{- end }}
             - name: DATABASE_URL
               valueFrom:

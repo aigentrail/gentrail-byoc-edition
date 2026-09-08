@@ -1,0 +1,17 @@
+{{- if .Values.marketingConsole.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: marketing-console
+  namespace: {{ .Release.Namespace }}
+  labels:
+{{ include "gentrail.labels" (merge (dict "component" "marketing-console") .) | indent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.marketingConsole.port }}
+      targetPort: http
+      name: http
+  selector:
+{{ include "gentrail.selectorLabels" (merge (dict "component" "marketing-console") .) | indent 4 }}
+{{- end }}
