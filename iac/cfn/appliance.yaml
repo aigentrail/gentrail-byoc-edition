@@ -224,7 +224,7 @@ Resources:
             SRC=/opt/gentrail/src
             rm -rf "$SRC"
             git clone --depth 1 --branch "${RepoBranch}" "${PublicRepoUrl}" "$SRC"
-            INIT_DIR="$SRC/deploy/m3/init"
+            INIT_DIR="$SRC/iac/init"
             k3s kubectl create namespace gentrail --dry-run=client -o yaml | k3s kubectl apply -f -
             CM_ARGS="--from-file=init-aws.sh=$INIT_DIR/init-aws.sh"
             for f in "$INIT_DIR"/tables/*.json; do CM_ARGS="$CM_ARGS --from-file=$(basename "$f")=$f"; done
@@ -234,7 +234,7 @@ Resources:
             #!/bin/bash
             set -euo pipefail
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-            CHART=/opt/gentrail/src/deploy/m3/helm/gentrail
+            CHART=/opt/gentrail/src/charts/gentrail
             LICENSE_SET=""
             if [ -f /opt/gentrail/license.jwt ]; then LICENSE_SET="--set-file license.jwt=/opt/gentrail/license.jwt"; fi
             helm upgrade --install gentrail "$CHART" --namespace gentrail -f "$CHART/values-appliance.yaml" --set createNamespace=false $LICENSE_SET --wait --timeout 15m
@@ -263,11 +263,11 @@ Resources:
 
 Outputs:
   InstanceId:
-    Description: Appliance node instance id (connect.sh / teardown.sh use it for SSM).
+    Description: Appliance node instance id (gentrail connect / teardown reach it over SSM).
     Value: !Ref Node
   Tier:
     Description: Marks this stack as the evaluation appliance tier.
     Value: eval
   ConnectHint:
     Description: How to reach the dashboard.
-    Value: "Run ./connect.sh (TIER=eval): it SSM-tunnels the dashboard to http://localhost:8001"
+    Value: "Run gentrail connect: it SSM-tunnels the dashboard to http://localhost:8001"

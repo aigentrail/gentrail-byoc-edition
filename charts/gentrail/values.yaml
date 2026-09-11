@@ -1,5 +1,5 @@
 # Defaults — all CFN-output-derived keys are left empty so a value injected
-# by cfn-to-values.sh wins via -f override.
+# by the installer via -f override wins.
 
 # Deployment substrate. The two targets differ only in how pods get AWS creds and
 # who provisions the RDS secret, so they collapse to one profile rather than a set
@@ -23,7 +23,7 @@ image:
   # dev deploy overrides this to ghcr in infra/k3s-apps. images.yml mirrors every
   # release tag from ghcr to this registry.
   registry: public.ecr.aws/p6a2v1k1
-  tag: v0.3.0
+  tag: v0.4.0
   pullPolicy: IfNotPresent
   pullSecret: ""
 

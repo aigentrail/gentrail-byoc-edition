@@ -58,6 +58,15 @@ Metadata:
       - Label: { default: "Observability" }
         Parameters:
           - CloudWatchLogsRetentionDays
+      - Label: { default: "In-cluster bootstrap" }
+        Parameters:
+          - PublicRepoUrl
+          - RepoBranch
+          - BootstrapInstanceType
+          - ChartRevision
+          - ImageTag
+          - GhcrUser
+          - GhcrToken
       - Label: { default: "Cross-account (P4)" }
         Parameters:
           - VendorAccountId
@@ -158,6 +167,41 @@ Parameters:
   ArchiverCodeS3Key:
     Type: String
     Default: "gentrail/archiver.zip"
+
+  # ── In-cluster bootstrap ───────────────────────────────────────────────
+  LatestAl2023Ami:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Resolved at deploy time from the public AL2023 SSM alias. Do not override.
+  PublicRepoUrl:
+    Type: String
+    Default: https://github.com/aigentrail/gentrail-byoc-edition.git
+    Description: Public repo the bootstrap node clones to get the Helm chart.
+  RepoBranch:
+    Type: String
+    Default: main
+    Description: Branch of the public repo to clone (pin a release branch, or a test branch).
+  BootstrapInstanceType:
+    Type: String
+    Default: t3.small
+    Description: Ephemeral node that runs the in-cluster install, then self-stops.
+  ChartRevision:
+    Type: String
+    Default: "1"
+    Description: Bump to force the in-cluster bootstrap to re-run helm on a stack update.
+  ImageTag:
+    Type: String
+    Default: ""
+    Description: Override the chart's pinned image tag; empty uses the chart pin.
+  GhcrUser:
+    Type: String
+    Default: ""
+    Description: Registry username, only when pulling images from a private registry.
+  GhcrToken:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: Registry read token, only when pulling images from a private registry.
 
   # ── RDS ────────────────────────────────────────────────────────────────
   RdsInstanceClass:
@@ -714,7 +758,7 @@ Resources:
       Tags:
         - { Key: gentrail:role, Value: rds-master }
 
-  # >>> GENERATED ddb-tables (source iac/ddb.cue, regen deploy/m3/scripts/gen-cfn.sh; do not hand-edit)
+  # >>> GENERATED ddb-tables (source iac/ddb.cue, regen scripts/gen-cfn.sh; do not hand-edit)
   TracesTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -1209,6 +1253,12 @@ Resources:
         EndpointPublicAccess: true
         EndpointPrivateAccess: true
         PublicAccessCidrs: [ !Ref AllowedIngressCidr ]
+      # API_AND_CONFIG_MAP (not the default CONFIG_MAP) so the bootstrap node's
+      # AccessEntry is honored, while the managed nodegroup keeps its aws-auth
+      # self-registration.
+      AccessConfig:
+        AuthenticationMode: API_AND_CONFIG_MAP
+        BootstrapClusterCreatorAdminPermissions: true
       Logging:
         ClusterLogging:
           EnabledTypes:
@@ -1491,8 +1541,253 @@ Resources:
           }
         - OidcArn: !GetAtt EksOidcProvider.Arn
           OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
-      # Inline policy attached at install time by deploy/m3/scripts/install-alb-controller.sh
-      # (downloads the latest upstream IAM policy from kubernetes-sigs/aws-load-balancer-controller).
+      # ALB controller IAM policy embedded from upstream v2.8.2 (pinned): no
+      # runtime fetch, no iam:PutRolePolicy grant, full surface auditable here.
+      Policies:
+        - PolicyName: AwsLoadBalancerControllerPolicy
+          PolicyDocument:
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "iam:CreateServiceLinkedRole"
+                        ],
+                        "Resource": "*",
+                        "Condition": {
+                            "StringEquals": {
+                                "iam:AWSServiceName": "elasticloadbalancing.amazonaws.com"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:DescribeAccountAttributes",
+                            "ec2:DescribeAddresses",
+                            "ec2:DescribeAvailabilityZones",
+                            "ec2:DescribeInternetGateways",
+                            "ec2:DescribeVpcs",
+                            "ec2:DescribeVpcPeeringConnections",
+                            "ec2:DescribeSubnets",
+                            "ec2:DescribeSecurityGroups",
+                            "ec2:DescribeInstances",
+                            "ec2:DescribeNetworkInterfaces",
+                            "ec2:DescribeTags",
+                            "ec2:GetCoipPoolUsage",
+                            "ec2:DescribeCoipPools",
+                            "elasticloadbalancing:DescribeLoadBalancers",
+                            "elasticloadbalancing:DescribeLoadBalancerAttributes",
+                            "elasticloadbalancing:DescribeListeners",
+                            "elasticloadbalancing:DescribeListenerCertificates",
+                            "elasticloadbalancing:DescribeSSLPolicies",
+                            "elasticloadbalancing:DescribeRules",
+                            "elasticloadbalancing:DescribeTargetGroups",
+                            "elasticloadbalancing:DescribeTargetGroupAttributes",
+                            "elasticloadbalancing:DescribeTargetHealth",
+                            "elasticloadbalancing:DescribeTags",
+                            "elasticloadbalancing:DescribeTrustStores"
+                        ],
+                        "Resource": "*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "cognito-idp:DescribeUserPoolClient",
+                            "acm:ListCertificates",
+                            "acm:DescribeCertificate",
+                            "iam:ListServerCertificates",
+                            "iam:GetServerCertificate",
+                            "waf-regional:GetWebACL",
+                            "waf-regional:GetWebACLForResource",
+                            "waf-regional:AssociateWebACL",
+                            "waf-regional:DisassociateWebACL",
+                            "wafv2:GetWebACL",
+                            "wafv2:GetWebACLForResource",
+                            "wafv2:AssociateWebACL",
+                            "wafv2:DisassociateWebACL",
+                            "shield:GetSubscriptionState",
+                            "shield:DescribeProtection",
+                            "shield:CreateProtection",
+                            "shield:DeleteProtection"
+                        ],
+                        "Resource": "*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:AuthorizeSecurityGroupIngress",
+                            "ec2:RevokeSecurityGroupIngress"
+                        ],
+                        "Resource": "*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:CreateSecurityGroup"
+                        ],
+                        "Resource": "*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:CreateTags"
+                        ],
+                        "Resource": "arn:aws:ec2:*:*:security-group/*",
+                        "Condition": {
+                            "StringEquals": {
+                                "ec2:CreateAction": "CreateSecurityGroup"
+                            },
+                            "Null": {
+                                "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:CreateTags",
+                            "ec2:DeleteTags"
+                        ],
+                        "Resource": "arn:aws:ec2:*:*:security-group/*",
+                        "Condition": {
+                            "Null": {
+                                "aws:RequestTag/elbv2.k8s.aws/cluster": "true",
+                                "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "ec2:AuthorizeSecurityGroupIngress",
+                            "ec2:RevokeSecurityGroupIngress",
+                            "ec2:DeleteSecurityGroup"
+                        ],
+                        "Resource": "*",
+                        "Condition": {
+                            "Null": {
+                                "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:CreateLoadBalancer",
+                            "elasticloadbalancing:CreateTargetGroup"
+                        ],
+                        "Resource": "*",
+                        "Condition": {
+                            "Null": {
+                                "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:CreateListener",
+                            "elasticloadbalancing:DeleteListener",
+                            "elasticloadbalancing:CreateRule",
+                            "elasticloadbalancing:DeleteRule"
+                        ],
+                        "Resource": "*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:AddTags",
+                            "elasticloadbalancing:RemoveTags"
+                        ],
+                        "Resource": [
+                            "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*"
+                        ],
+                        "Condition": {
+                            "Null": {
+                                "aws:RequestTag/elbv2.k8s.aws/cluster": "true",
+                                "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:AddTags",
+                            "elasticloadbalancing:RemoveTags"
+                        ],
+                        "Resource": [
+                            "arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*"
+                        ]
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:ModifyLoadBalancerAttributes",
+                            "elasticloadbalancing:SetIpAddressType",
+                            "elasticloadbalancing:SetSecurityGroups",
+                            "elasticloadbalancing:SetSubnets",
+                            "elasticloadbalancing:DeleteLoadBalancer",
+                            "elasticloadbalancing:ModifyTargetGroup",
+                            "elasticloadbalancing:ModifyTargetGroupAttributes",
+                            "elasticloadbalancing:DeleteTargetGroup"
+                        ],
+                        "Resource": "*",
+                        "Condition": {
+                            "Null": {
+                                "aws:ResourceTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:AddTags"
+                        ],
+                        "Resource": [
+                            "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*",
+                            "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*"
+                        ],
+                        "Condition": {
+                            "StringEquals": {
+                                "elasticloadbalancing:CreateAction": [
+                                    "CreateTargetGroup",
+                                    "CreateLoadBalancer"
+                                ]
+                            },
+                            "Null": {
+                                "aws:RequestTag/elbv2.k8s.aws/cluster": "false"
+                            }
+                        }
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:RegisterTargets",
+                            "elasticloadbalancing:DeregisterTargets"
+                        ],
+                        "Resource": "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*"
+                    },
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "elasticloadbalancing:SetWebAcl",
+                            "elasticloadbalancing:ModifyListener",
+                            "elasticloadbalancing:AddListenerCertificates",
+                            "elasticloadbalancing:RemoveListenerCertificates",
+                            "elasticloadbalancing:ModifyRule"
+                        ],
+                        "Resource": "*"
+                    }
+                ]
+            }
       Tags:
         - { Key: gentrail:service-account, Value: aws-load-balancer-controller }
 
@@ -1599,6 +1894,7 @@ Resources:
               - Sid: DdbReadWrite
                 Effect: Allow
                 Action:
+                  - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:Scan
                   - dynamodb:PutItem
@@ -1778,10 +2074,8 @@ Resources:
     Properties:
       FunctionName: !Sub "${ClusterName}-bedrock-validator"
       Runtime: python3.12
-      # Inline ZipFile lands as `index.py` in the Lambda env — Handler must
-      # be `index.handler`, NOT `handler.handler`. The standalone handler.py
-      # file in deploy/m3/cfn/lambda/bedrock-validator/ is for future cfn-package
-      # builds; keep both in sync but only `index.handler` works for inline ZipFile.
+      # Inline ZipFile lands as `index.py` in the Lambda env, so the Handler must
+      # be `index.handler`, not `handler.handler`.
       Handler: index.handler
       Role: !GetAtt BedrockValidatorRole.Arn
       Timeout: 30
@@ -1821,6 +2115,223 @@ Resources:
       ServiceToken: !GetAtt BedrockValidatorFn.Arn
       BedrockModelId: !Ref BedrockModelId
       Region: !Ref AWS::Region
+
+  # ── In-cluster bootstrap ───────────────────────────────────────────────
+  # An ephemeral node that runs the chart install in the customer account and
+  # signals CFN, so the CLI only creates the stack and waits. Mirrors the eval
+  # appliance's UserData + cfn-signal idiom (iac/cfn/appliance.yaml).
+  BootstrapRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: bootstrap-eks-describe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: eks:DescribeCluster
+                Resource: !GetAtt EksCluster.Arn
+      Tags:
+        - { Key: gentrail:role, Value: bootstrap }
+
+  BootstrapInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref BootstrapRole ]
+
+  BootstrapSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Gentrail in-cluster bootstrap node, egress-only, no inbound (SSM-only).
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: All outbound (chart/image pulls, EKS API, SSM, AWS APIs).
+      Tags: [ { Key: Name, Value: !Sub "${AWS::StackName}-bootstrap" } ]
+
+  # Let the bootstrap SG reach the EKS-managed cluster SG on 443 so kubectl/helm
+  # hit the private API endpoint (mirrors RdsIngressFromClusterSg).
+  BootstrapApiIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !Ref BootstrapSecurityGroup
+
+  BootstrapAccessEntry:
+    Type: AWS::EKS::AccessEntry
+    Properties:
+      ClusterName: !Ref EksCluster
+      PrincipalArn: !GetAtt BootstrapRole.Arn
+      Type: STANDARD
+      AccessPolicies:
+        - PolicyArn: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          AccessScope:
+            Type: cluster
+
+  # InstanceInitiatedShutdownBehavior=stop so the box self-stops after a clean
+  # install (near-zero idle cost) instead of terminating a CFN-owned resource.
+  BootstrapLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${ClusterName}-bootstrap-lt"
+      LaunchTemplateData:
+        InstanceInitiatedShutdownBehavior: stop
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeSize: 20
+              VolumeType: gp3
+              Encrypted: true
+              DeleteOnTermination: true
+
+  BootstrapInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: [ NodeGroup, EbsCsiAddon, BootstrapAccessEntry, BootstrapApiIngress, RdsIngressFromClusterSg ]
+    Properties:
+      ImageId: !Ref LatestAl2023Ami
+      InstanceType: !Ref BootstrapInstanceType
+      IamInstanceProfile: !Ref BootstrapInstanceProfile
+      SubnetId: !Ref PrivateSubnet0
+      SecurityGroupIds: [ !Ref BootstrapSecurityGroup ]
+      LaunchTemplate:
+        LaunchTemplateId: !Ref BootstrapLaunchTemplate
+        Version: !GetAtt BootstrapLaunchTemplate.LatestVersionNumber
+      Tags: [ { Key: Name, Value: !Sub "${AWS::StackName}-bootstrap" } ]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > /var/log/gentrail-install.log 2>&1
+          echo "gentrail in-cluster bootstrap, chart revision ${ChartRevision}"
+
+          signal() { /opt/aws/bin/cfn-signal --exit-code "$1" --stack ${AWS::StackName} --resource BootstrapInstance --region ${AWS::Region} || true; }
+          trap 'signal 1' ERR
+
+          dnf install -y git tar gzip unzip aws-cfn-bootstrap || yum install -y git tar gzip aws-cfn-bootstrap
+          command -v aws >/dev/null || dnf install -y awscli
+          curl -sfLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.32.0/bin/linux/amd64/kubectl
+          chmod +x /usr/local/bin/kubectl
+          curl -sfL https://get.helm.sh/helm-v3.15.4-linux-amd64.tar.gz | tar -xz -C /tmp
+          install -m 0755 /tmp/linux-amd64/helm /usr/local/bin/helm
+
+          IMAGE_TAG="${ImageTag}"
+          PUBLIC_HOST="${Hostname}"
+          OTEL_HOST="${OtelHostname}"
+          GHCR_USER="${GhcrUser}"
+          GHCR_TOKEN="${GhcrToken}"
+
+          export KUBECONFIG=/root/.kube/config
+          mkdir -p /root/.kube
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if aws eks update-kubeconfig --name ${EksCluster} --region ${AWS::Region} --kubeconfig "$KUBECONFIG" && kubectl get --raw /readyz >/dev/null 2>&1; then break; fi
+            echo "waiting for cluster API + access entry ($i)"; sleep 12
+          done
+
+          kubectl annotate storageclass gp2 storageclass.kubernetes.io/is-default-class- --overwrite || true
+          kubectl apply -f - <<'SC'
+          apiVersion: storage.k8s.io/v1
+          kind: StorageClass
+          metadata:
+            name: gp3-csi
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+          provisioner: ebs.csi.aws.com
+          volumeBindingMode: WaitForFirstConsumer
+          parameters:
+            type: gp3
+          SC
+
+          kubectl apply -f - <<'SA'
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: aws-load-balancer-controller
+            namespace: kube-system
+            annotations:
+              eks.amazonaws.com/role-arn: ${AlbControllerIrsaRole.Arn}
+          SA
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+          helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller --namespace kube-system --version 1.8.2 --set clusterName=${EksCluster} --set region=${AWS::Region} --set vpcId=${Vpc} --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller --wait --timeout 5m
+
+          SRC=/opt/gentrail/src
+          rm -rf "$SRC"
+          git clone --depth 1 --branch "${RepoBranch}" "${PublicRepoUrl}" "$SRC"
+          CHART=$SRC/charts/gentrail
+
+          mkdir -p /opt/gentrail
+          cat > /opt/gentrail/values.yaml <<'VALUES'
+          mode: eks
+          aws:
+            region: ${AWS::Region}
+          cloudflared:
+            enabled: false
+          image:
+            registry: public.ecr.aws/p6a2v1k1
+          ingress:
+            host: "${Hostname}"
+            certArn: "${ExistingAcmCertArn}"
+            otelHost: "${OtelHostname}"
+          ddb:
+            tablePrefix: ${DdbTableNamePrefix}
+          s3:
+            evidenceBucket: ${EvidenceBucket}
+          rds:
+            endpoint: ${RdsInstance.Endpoint.Address}:${RdsInstance.Endpoint.Port}
+            secretArn: ${RdsMasterSecret}
+          llm:
+            provider: bedrock
+            model: ${BedrockModelId}
+          irsa:
+            dashboard: ${DashboardIrsaRole.Arn}
+            policyEngine: ${PolicyEngineIrsaRole.Arn}
+            evaluator: ${EvaluatorIrsaRole.Arn}
+            authproxy: ${AuthproxyIrsaRole.Arn}
+            rdsBootstrap: ${RdsBootstrapIrsaRole.Arn}
+          license:
+            secretRef: gentrail-license
+          audit:
+            pvcSize: 10Gi
+          VALUES
+
+          kubectl create namespace gentrail --dry-run=client -o yaml | kubectl apply -f -
+
+          HELM_EXTRA=""
+          if [ -n "$IMAGE_TAG" ]; then HELM_EXTRA="$HELM_EXTRA --set image.tag=$IMAGE_TAG"; fi
+          if [ -n "$OTEL_HOST" ]; then HELM_EXTRA="$HELM_EXTRA --set ingress.otelInternal=false"; fi
+          if [ -n "$PUBLIC_HOST" ]; then HELM_EXTRA="$HELM_EXTRA --set ingress.dashboardInternal=false"; fi
+          if [ -n "$GHCR_TOKEN" ]; then
+            set +x
+            kubectl -n gentrail create secret docker-registry ghcr --docker-server=ghcr.io --docker-username="$GHCR_USER" --docker-password="$GHCR_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
+            set -x
+            HELM_EXTRA="$HELM_EXTRA --set image.pullSecret=ghcr"
+          fi
+
+          helm upgrade --install gentrail "$CHART" -n gentrail -f /opt/gentrail/values.yaml --set createNamespace=false --set storage.class=gp3-csi $HELM_EXTRA --wait --timeout 12m
+
+          trap - ERR
+          signal 0
+          echo "gentrail in-cluster bootstrap complete"
+          shutdown -h now
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+        Count: 1
 
 Outputs:
   Tier:
@@ -1905,3 +2416,7 @@ Outputs:
   GentrailReadOnlyRoleArn:
     Description: Read-only scanner role the dashboard assumes to scan this account; for the cross-account vendor path, email this + your ExternalId to support@gentrail.ai
     Value: !GetAtt GentrailReadOnlyRole.Arn
+
+  BootstrapInstanceId:
+    Description: The ephemeral in-cluster install node; SSM into it to read /var/log/gentrail-install.log if an install fails.
+    Value: !Ref BootstrapInstance

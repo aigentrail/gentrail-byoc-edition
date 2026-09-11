@@ -2,7 +2,7 @@
 # Local-only stand-ins so the chart runs end to end on k3s/k3d without real AWS:
 # DynamoDB-local + Postgres + the table-init Job. Gated on local.enabled; never
 # rendered for a cloud install. The init-aws ConfigMap is created by the runner
-# from the canonical deploy/m3/init/init-aws.sh, so table definitions never fork.
+# from the canonical iac/init/init-aws.sh, so table definitions never fork.
 # StatefulSet + PVC (not -inMemory) so an appliance reboot keeps the data.
 apiVersion: apps/v1
 kind: StatefulSet
