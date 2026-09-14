@@ -43,14 +43,5 @@ spec:
       volumes:
         - name: config
           configMap: { name: nats }
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes: [ ReadWriteOnce ]
-        {{- if .Values.storage.class }}
-        storageClassName: {{ .Values.storage.class | quote }}
-        {{- end }}
-        resources:
-          requests:
-            storage: {{ .Values.nats.jetstreamSize | quote }}
+        - name: data
+          emptyDir: { sizeLimit: {{ .Values.nats.jetstreamSize | quote }} }

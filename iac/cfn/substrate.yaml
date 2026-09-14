@@ -12,6 +12,8 @@ Metadata:
           - VpcCidr
           - AzCount
           - AllowedIngressCidr
+          - DashboardExposure
+          - OtelExposure
           - EnableVpcEndpoints
           - EnableVpcFlowLogs
       - Label: { default: "EKS" }
@@ -260,6 +262,16 @@ Parameters:
     Default: "ELBSecurityPolicy-TLS13-1-3-2021-06"
 
   # ── LLM ────────────────────────────────────────────────────────────────
+  DashboardExposure:
+    Type: String
+    Default: internal
+    AllowedValues: [ internal, internet-facing ]
+    Description: Where the dashboard load balancer listens; internal is reachable only inside the VPC (gentrail connect tunnels to it), internet-facing needs ExistingAcmCertArn.
+  OtelExposure:
+    Type: String
+    Default: internal
+    AllowedValues: [ internal, internet-facing ]
+    Description: Where the OTLP ingest load balancer listens; internet-facing lets agents outside the VPC send telemetry without a tunnel.
   BedrockModelId:
     Type: String
     Default: "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
@@ -325,6 +337,9 @@ Conditions:
   EnableVpcFlowLogsCond: !Equals [ !Ref EnableVpcFlowLogs, "true" ]
   EnableRdsPerformanceInsightsCond: !Equals [ !Ref EnableRdsPerformanceInsights, "true" ]
   EnableAlbAccessLogsCond: !Equals [ !Ref EnableAlbAccessLogs, "true" ]
+  DashboardPublic: !Equals [ !Ref DashboardExposure, internet-facing ]
+  OtelPublic: !Equals [ !Ref OtelExposure, internet-facing ]
+  HasCert: !Not [ !Equals [ !Ref ExistingAcmCertArn, "" ] ]
   ThreeOrMoreAzs: !Not [ !Equals [ !Ref AzCount, 2 ] ]
   FourOrMoreAzs: !Or [ !Equals [ !Ref AzCount, 4 ], !Equals [ !Ref AzCount, 5 ], !Equals [ !Ref AzCount, 6 ] ]
   FiveOrMoreAzs: !Or [ !Equals [ !Ref AzCount, 5 ], !Equals [ !Ref AzCount, 6 ] ]
@@ -535,8 +550,12 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: !Ref Vpc
-      GroupDescription: ALB ingress (443 only)
+      GroupDescription: Gentrail load balancers (dashboard + OTLP ingest)
       SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: !Ref AllowedIngressCidr
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
@@ -1156,7 +1175,7 @@ Resources:
               # For multi-region support, add a Mappings table by region.
               AWS: !Sub "arn:aws:iam::797873946194:root"
             Action: s3:PutObject
-            Resource: !Sub "${AlbLogsBucket.Arn}/AWSLogs/${AWS::AccountId}/*"
+            Resource: !Sub "${AlbLogsBucket.Arn}/*"
 
   VpcFlowLogsBucket:
     Condition: EnableVpcFlowLogsCond
@@ -1343,43 +1362,123 @@ Resources:
       Tags:
         gentrail:role: eks-node
 
-  # ── EBS CSI driver addon (required for PersistentVolumeClaims) ───
-  # Without this addon, every PVC stays Pending and any pod with a
-  # PVC won't schedule. Default-EKS doesn't include it.
-  EbsCsiIrsaRole:
-    Type: AWS::IAM::Role
+  # ── Edge ─────────────────────────────────────────────────────────
+  # CloudFormation owns the load balancers, target groups, and security
+  # group, so a delete-stack from any path removes them. The chart binds pods
+  # into the target groups (TargetGroupBinding) and creates nothing in AWS.
+  NodeIngressFromAlbDashboard:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      AssumeRolePolicyDocument: !Sub
-        - |
-          {
-            "Version": "2012-10-17",
-            "Statement": [{
-              "Effect": "Allow",
-              "Principal": { "Federated": "${OidcArn}" },
-              "Action": "sts:AssumeRoleWithWebIdentity",
-              "Condition": {
-                "StringEquals": {
-                  "${OidcUrl}:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa",
-                  "${OidcUrl}:aud": "sts.amazonaws.com"
-                }
-              }
-            }]
-          }
-        - OidcArn: !GetAtt EksOidcProvider.Arn
-          OidcUrl: !Select [1, !Split ["//", !GetAtt EksCluster.OpenIdConnectIssuerUrl]]
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy
-      Tags:
-        - { Key: gentrail:service-account, Value: ebs-csi-controller-sa }
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 8001
+      ToPort: 8001
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
 
-  EbsCsiAddon:
-    Type: AWS::EKS::Addon
-    DependsOn: NodeGroup
+  NodeIngressFromAlbOtel:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
-      ClusterName: !Ref EksCluster
-      AddonName: aws-ebs-csi-driver
-      ServiceAccountRoleArn: !GetAtt EbsCsiIrsaRole.Arn
-      ResolveConflicts: OVERWRITE
+      GroupId: !GetAtt EksCluster.ClusterSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 4318
+      ToPort: 4318
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  DashboardTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 8001
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: 200-399 }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-dashboard" }
+
+  OtelTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 4318
+      TargetType: ip
+      HealthCheckPath: /healthz
+      HealthCheckIntervalSeconds: 15
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher: { HttpCode: 200-399 }
+      TargetGroupAttributes:
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-otel" }
+
+  DashboardLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: !Ref DashboardExposure
+      SecurityGroups: [ !Ref AlbSecurityGroup ]
+      Subnets: !If
+        - DashboardPublic
+        - [ !Ref PublicSubnet0, !Ref PublicSubnet1, !If [ ThreeOrMoreAzs, !Ref PublicSubnet2, !Ref AWS::NoValue ] ]
+        - [ !Ref PrivateSubnet0, !Ref PrivateSubnet1, !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ] ]
+      LoadBalancerAttributes: !If
+        - EnableAlbAccessLogsCond
+        - - { Key: access_logs.s3.enabled, Value: "true" }
+          - { Key: access_logs.s3.bucket, Value: !Ref AlbLogsBucket }
+          - { Key: access_logs.s3.prefix, Value: dashboard }
+        - !Ref AWS::NoValue
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-dashboard" }
+        - { Key: gentrail:access-logs, Value: !If [ EnableAlbAccessLogsCond, !Ref AlbLogsBucketPolicy, disabled ] }
+
+  OtelLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: !Ref OtelExposure
+      SecurityGroups: [ !Ref AlbSecurityGroup ]
+      Subnets: !If
+        - OtelPublic
+        - [ !Ref PublicSubnet0, !Ref PublicSubnet1, !If [ ThreeOrMoreAzs, !Ref PublicSubnet2, !Ref AWS::NoValue ] ]
+        - [ !Ref PrivateSubnet0, !Ref PrivateSubnet1, !If [ ThreeOrMoreAzs, !Ref PrivateSubnet2, !Ref AWS::NoValue ] ]
+      LoadBalancerAttributes: !If
+        - EnableAlbAccessLogsCond
+        - - { Key: access_logs.s3.enabled, Value: "true" }
+          - { Key: access_logs.s3.bucket, Value: !Ref AlbLogsBucket }
+          - { Key: access_logs.s3.prefix, Value: otel }
+        - !Ref AWS::NoValue
+      Tags:
+        - { Key: Name, Value: !Sub "${ClusterName}-otel" }
+        - { Key: gentrail:access-logs, Value: !If [ EnableAlbAccessLogsCond, !Ref AlbLogsBucketPolicy, disabled ] }
+
+  DashboardListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref DashboardLoadBalancer
+      Port: !If [ HasCert, 443, 80 ]
+      Protocol: !If [ HasCert, HTTPS, HTTP ]
+      Certificates: !If [ HasCert, [ { CertificateArn: !Ref ExistingAcmCertArn } ], !Ref AWS::NoValue ]
+      SslPolicy: !If [ HasCert, !Ref TlsPolicy, !Ref AWS::NoValue ]
+      DefaultActions:
+        - { Type: forward, TargetGroupArn: !Ref DashboardTargetGroup }
+
+  OtelListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref OtelLoadBalancer
+      Port: !If [ HasCert, 443, 80 ]
+      Protocol: !If [ HasCert, HTTPS, HTTP ]
+      Certificates: !If [ HasCert, [ { CertificateArn: !Ref ExistingAcmCertArn } ], !Ref AWS::NoValue ]
+      SslPolicy: !If [ HasCert, !Ref TlsPolicy, !Ref AWS::NoValue ]
+      DefaultActions:
+        - { Type: forward, TargetGroupArn: !Ref OtelTargetGroup }
 
   # ── IRSA: one role per service ───────────────────────────────────
   DashboardIrsaRole:
@@ -1861,6 +1960,9 @@ Resources:
               - Effect: Allow
                 Action: kms:Decrypt
                 Resource: !If [ CreateKmsKey, !GetAtt SubstrateKmsKey.Arn, !Ref ExistingKmsKeyArn ]
+              - Effect: Allow
+                Action: rds:DescribeDBInstances
+                Resource: !Sub "arn:aws:rds:${AWS::Region}:${AWS::AccountId}:db:${ClusterName}-rds"
       Tags:
         - { Key: gentrail:service-account, Value: rds-secret-bootstrap }
 
@@ -2201,7 +2303,7 @@ Resources:
 
   BootstrapInstance:
     Type: AWS::EC2::Instance
-    DependsOn: [ NodeGroup, EbsCsiAddon, BootstrapAccessEntry, BootstrapApiIngress, RdsIngressFromClusterSg ]
+    DependsOn: [ NodeGroup, BootstrapAccessEntry, BootstrapApiIngress, RdsIngressFromClusterSg ]
     Properties:
       ImageId: !Ref LatestAl2023Ami
       InstanceType: !Ref BootstrapInstanceType
@@ -2242,20 +2344,6 @@ Resources:
             echo "waiting for cluster API + access entry ($i)"; sleep 12
           done
 
-          kubectl annotate storageclass gp2 storageclass.kubernetes.io/is-default-class- --overwrite || true
-          kubectl apply -f - <<'SC'
-          apiVersion: storage.k8s.io/v1
-          kind: StorageClass
-          metadata:
-            name: gp3-csi
-            annotations:
-              storageclass.kubernetes.io/is-default-class: "true"
-          provisioner: ebs.csi.aws.com
-          volumeBindingMode: WaitForFirstConsumer
-          parameters:
-            type: gp3
-          SC
-
           kubectl apply -f - <<'SA'
           apiVersion: v1
           kind: ServiceAccount
@@ -2268,6 +2356,12 @@ Resources:
           helm repo add eks https://aws.github.io/eks-charts
           helm repo update
           helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller --namespace kube-system --version 1.8.2 --set clusterName=${EksCluster} --set region=${AWS::Region} --set vpcId=${Vpc} --set serviceAccount.create=false --set serviceAccount.name=aws-load-balancer-controller --wait --timeout 5m
+
+          # EKS ships CoreDNS with a PodDisruptionBudget that stalls a node drain when
+          # its last replica has nowhere to go: ~4 extra minutes on every teardown.
+          # Drains here are one node at a time, so a fully-unavailable budget only
+          # risks a seconds-long DNS blip during a nodegroup update.
+          kubectl patch pdb coredns -n kube-system --type merge -p '{"spec":{"maxUnavailable":"100%"}}' || true
 
           SRC=/opt/gentrail/src
           rm -rf "$SRC"
@@ -2284,15 +2378,15 @@ Resources:
           image:
             registry: public.ecr.aws/p6a2v1k1
           ingress:
-            host: "${Hostname}"
-            certArn: "${ExistingAcmCertArn}"
-            otelHost: "${OtelHostname}"
+            targetGroups:
+              dashboardArn: ${DashboardTargetGroup}
+              otelArn: ${OtelTargetGroup}
           ddb:
             tablePrefix: ${DdbTableNamePrefix}
           s3:
             evidenceBucket: ${EvidenceBucket}
           rds:
-            endpoint: ${RdsInstance.Endpoint.Address}:${RdsInstance.Endpoint.Port}
+            instanceId: ${ClusterName}-rds
             secretArn: ${RdsMasterSecret}
           llm:
             provider: bedrock
@@ -2305,8 +2399,6 @@ Resources:
             rdsBootstrap: ${RdsBootstrapIrsaRole.Arn}
           license:
             secretRef: gentrail-license
-          audit:
-            pvcSize: 10Gi
           VALUES
 
           kubectl create namespace gentrail --dry-run=client -o yaml | kubectl apply -f -
@@ -2322,7 +2414,7 @@ Resources:
             HELM_EXTRA="$HELM_EXTRA --set image.pullSecret=ghcr"
           fi
 
-          helm upgrade --install gentrail "$CHART" -n gentrail -f /opt/gentrail/values.yaml --set createNamespace=false --set storage.class=gp3-csi $HELM_EXTRA --wait --timeout 12m
+          helm upgrade --install gentrail "$CHART" -n gentrail -f /opt/gentrail/values.yaml --set createNamespace=false $HELM_EXTRA --wait --timeout 12m
 
           trap - ERR
           signal 0
@@ -2420,3 +2512,13 @@ Outputs:
   BootstrapInstanceId:
     Description: The ephemeral in-cluster install node; SSM into it to read /var/log/gentrail-install.log if an install fails.
     Value: !Ref BootstrapInstance
+  DashboardUrl:
+    Description: The dashboard behind the stack's own load balancer; private inside the VPC unless DashboardExposure is internet-facing (gentrail connect tunnels to it either way).
+    Value: !If [ HasCert, !Sub "https://${DashboardLoadBalancer.DNSName}", !Sub "http://${DashboardLoadBalancer.DNSName}" ]
+  OtelUrl:
+    Description: OTLP ingest behind the stack's own load balancer; agents send telemetry here.
+    Value: !If [ HasCert, !Sub "https://${OtelLoadBalancer.DNSName}", !Sub "http://${OtelLoadBalancer.DNSName}" ]
+  DashboardTargetGroupArn:
+    Value: !Ref DashboardTargetGroup
+  OtelTargetGroupArn:
+    Value: !Ref OtelTargetGroup

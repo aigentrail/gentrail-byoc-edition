@@ -6,10 +6,10 @@
     "mode":    { "type": "string", "enum": ["k3s", "eks"] },
     "aws":     { "type": "object", "required": ["region"], "properties": { "region": { "type": "string" } } },
     "image":   { "type": "object", "required": ["registry", "tag"], "properties": { "registry": { "type": "string" }, "tag": { "type": "string" }, "pullPolicy": { "type": "string" }, "pullSecret": { "type": "string" } } },
-    "ingress": { "type": "object", "required": ["host"], "properties": { "host": { "type": "string" }, "otelHost": { "type": "string" }, "certArn": { "type": "string" }, "dashboardInternal": { "type": "boolean" }, "otelInternal": { "type": "boolean" } } },
+    "ingress": { "type": "object", "properties": { "targetGroups": { "type": "object", "properties": { "dashboardArn": { "type": "string" }, "otelArn": { "type": "string" } } } } },
     "ddb":     { "type": "object", "required": ["tablePrefix"], "properties": { "tablePrefix": { "type": "string" } } },
     "s3":      { "type": "object", "required": ["evidenceBucket"], "properties": { "evidenceBucket": { "type": "string" }, "traceArchiveBucket": { "type": "string" } } },
-    "rds":     { "type": "object", "required": ["endpoint", "secretArn"], "properties": { "endpoint": { "type": "string" }, "secretArn": { "type": "string" } } },
+    "rds":     { "type": "object", "required": ["secretArn"], "properties": { "endpoint": { "type": "string" }, "instanceId": { "type": "string" }, "secretArn": { "type": "string" } } },
     "llm":     { "type": "object", "required": ["provider", "model"], "properties": { "provider": { "type": "string", "enum": ["bedrock", "openai"] }, "model": { "type": "string" } } },
     "irsa":    { "type": "object", "required": ["dashboard", "policyEngine", "rdsBootstrap"], "properties": { "dashboard": { "type": "string" }, "policyEngine": { "type": "string" }, "rdsBootstrap": { "type": "string" } } },
     "license": { "type": "object", "required": ["secretRef"], "properties": { "secretRef": { "type": "string" } } }

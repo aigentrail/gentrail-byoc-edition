@@ -53,6 +53,12 @@ and a short-lived bootstrap node inside the VPC installs the load balancer
 controller and the chart, then stops itself. Either way your machine only runs
 the CLI, and each step is shown as it happens.
 
+Production puts the dashboard and the OTLP ingest endpoint behind two load
+balancers the stack itself owns, private inside the VPC by default; `gentrail
+status` prints their URLs. Pass `--dashboard-exposure internet-facing` or
+`--otel-exposure internet-facing` together with `--cert-arn` (an ACM certificate)
+to publish either one with TLS, and `--allowed-cidr` to narrow who can reach them.
+
 Production needs broad admin-level AWS rights: the stack provisions a VPC, EKS,
 RDS, DynamoDB, Lambda, S3, KMS, Secrets Manager, CloudWatch Logs, and named IAM
 roles. Attach the scoped `iac/cfn/deploy-policy.json` from this repo to your
@@ -107,12 +113,14 @@ gentrail teardown                      # add --stack <name> if you changed it at
 ```
 
 Confirms once, then detects the tier. Evaluation deletes the single stack (its EC2
-and VPC). Production uninstalls the chart in-cluster so its load balancers and
-volumes are released, deletes the substrate (EKS + RDS + VPC), and removes anything
-the cluster left behind. Your data stores are kept on purpose: the DynamoDB tables,
-the evidence, trace-archive, and log buckets, and the KMS key survive a teardown so
-it can never destroy customer data. Delete them yourself when you are sure; until
-then a reinstall under the same stack name collides with the retained table names.
+and VPC). Production clears the database's deletion protection and deletes the
+substrate: EKS, RDS, the VPC, and the stack's own load balancers. Nothing the
+install creates lives outside its stack, so a console delete works the same way.
+Your data stores are kept on purpose: the DynamoDB tables, the evidence,
+trace-archive, and log buckets, the KMS key, and the gentrail-cfn-<account>-<region>
+bucket the CLI stages templates in survive a teardown so it can never destroy
+customer data. Delete them yourself when you are sure; until then a reinstall
+under the same stack name collides with the retained table names.
 
 ## What ships in this repo
 

@@ -128,31 +128,12 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 30
           volumeMounts:
-            - name: audit-buffer
-              mountPath: /var/lib/gentrail/audit
 {{- include "gentrail.licenseMount" . | nindent 12 }}
             {{- if and .Values.irsa.dashboard (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenMount" . | nindent 12 }}
             {{- end }}
       volumes:
 {{- include "gentrail.licenseVolume" . | nindent 8 }}
-        - name: audit-buffer
-          persistentVolumeClaim:
-            claimName: dashboard-audit-buffer
         {{- if and .Values.irsa.dashboard (eq .Values.mode "k3s") }}
 {{- include "gentrail.irsaTokenVolume" . | nindent 8 }}
         {{- end }}
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: dashboard-audit-buffer
-  namespace: {{ .Release.Namespace }}
-spec:
-  {{- if .Values.storage.class }}
-  storageClassName: {{ .Values.storage.class | quote }}
-  {{- end }}
-  accessModes: [ ReadWriteOnce ]
-  resources:
-    requests:
-      storage: {{ .Values.audit.pvcSize | quote }}

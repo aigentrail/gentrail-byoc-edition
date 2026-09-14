@@ -93,11 +93,6 @@ docsServer:
 # reach the dashboard via `kubectl port-forward svc/dashboard 8001:8001` or expose
 # the dashboard Service as a NodePort out-of-band. See wiring_changes for the
 # optional dashboard.serviceType=NodePort knob if you want a stable node port.
-ingress:
-  host: ""
-  otelHost: ""
-  certArn: ""
-
 # License is uploaded in-product: the pre-install hook seeds gentrail-license empty
 # and the services boot license-less and prompt for it. Set jwt here to pre-seed.
 license:

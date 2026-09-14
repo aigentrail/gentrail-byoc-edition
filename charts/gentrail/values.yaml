@@ -23,22 +23,16 @@ image:
   # dev deploy overrides this to ghcr in infra/k3s-apps. images.yml mirrors every
   # release tag from ghcr to this registry.
   registry: public.ecr.aws/p6a2v1k1
-  tag: v0.4.1
+  tag: v0.5.0
   pullPolicy: IfNotPresent
   pullSecret: ""
 
 ingress:
-  host: ""     # dashboard FQDN (only needed when its ALB is internet-facing)
-  otelHost: "" # OTLP ingest FQDN for the authproxy (otel.gentrail.ai)
-  certArn: ""  # ACM cert for the public host(s); with it the ALB serves HTTPS, else HTTP
-  # ALB scheme per endpoint, controlled independently. internal = reachable only
-  # inside the VPC / over VPN (clients use the ALB DNS name); false =
-  # internet-facing. Both default internal - the safe default, and what our own
-  # cloud uses behind a tunnel. The free-tier install makes OTLP ingest public
-  # (agents send telemetry without a tunnel) by setting otelInternal=false, while
-  # the dashboard stays internal. TLS is driven by certArn independently of scheme.
-  dashboardInternal: true
-  otelInternal: true
+  # Set by the production bootstrap from the substrate outputs: CloudFormation
+  # owns the load balancers, the chart only binds pods into their target groups.
+  targetGroups:
+    dashboardArn: ""
+    otelArn: ""
 
 # PVC storage class. "" uses the cluster default (k3s local-path); set gp2 on EKS.
 storage:
@@ -70,7 +64,8 @@ s3:
   traceArchiveBucket: ""
 
 rds:
-  endpoint: ""
+  endpoint: ""   # host:port; or leave empty and set instanceId so the pre-install job discovers it once RDS is available
+  instanceId: ""
   secretArn: ""
   # The pre-install Job that mints gentrail-rds-secret runs only on eks (see
   # mode); on k3s OpenTofu creates the secret, and local mode supplies it.
@@ -105,8 +100,6 @@ license:
   # empty the secret is created empty for the in-product upload to populate.
   jwt: ""
 
-audit:
-  pvcSize: 10Gi
 
 dashboard:
   replicaCount: 2
@@ -160,7 +153,7 @@ policyEngine:
 # 1 for a single-node env, 3 for the HA BYOC cluster.
 nats:
   replicas: 1
-  jetstreamSize: 5Gi
+  jetstreamSize: 5Gi  # emptyDir cap; the DynamoDB reconcile sweep (1h lookback) is the durable path, not the stream
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits:   { cpu: 500m, memory: 512Mi }
